@@ -42,6 +42,51 @@ paperclipai plugin list
 paperclipai plugin inspect tbro.home-assistant
 ```
 
+If the CLI is not in your image, the route the CLI calls is
+`POST /api/plugins/install` with `{"packageName": "<absolute path>",
+"isLocalPath": true}`, instance-admin only. Settings → Plugins does the same
+thing from the UI.
+
+Two install-time constraints are worth knowing before you try:
+
+- **Cloud-managed instances will refuse this.** A managed instance rejects npm
+  installs outright and accepts a local path only from inside its own bundled
+  plugin catalog. Self-hosted instances have neither restriction.
+- **The plugin id has to stay out of the distribution namespace.** The host runs
+  every activation through a distribution-catalog guard. An id that matches a
+  bundled plugin key, or a package inside the image's own plugin root, is
+  rejected with "Distribution plugin is absent or not selected in this
+  deployment". `tbro.home-assistant` is neither, so the guard passes it through
+  — which is why the id is namespaced the way it is. Do not rename it to
+  anything under `paperclip.`.
+
+### Where the install lives, and how to upgrade
+
+A local-path install is **referenced in place, not copied**. The host records
+the directory you named as the plugin's package path and reads the package from
+there on every activation. Practical consequences:
+
+- Where you clone it is where it lives, permanently. On a container deployment
+  put it on a bind-mounted volume; the plugin then survives an image rebuild,
+  which a connector compiled into the bundle cannot.
+- It survives a container restart with no reinstall. On boot the host loads the
+  plugins its registry has marked ready and resolves each one's recorded path.
+- Deleting or moving the directory does not uninstall it — it fails activation
+  and the row lands in `error`. Restoring the directory and restarting is
+  enough, because the host retries errored plugins once per boot.
+
+Upgrading is `git pull` in that directory, plus a restart if the manifest moved:
+
+- **Code-only change** (handler logic in `src/`, rebuilt into `dist/`) takes
+  effect on its own. The host watches the installed package path and restarts
+  the worker when its files change.
+- **Manifest change** — a new tool, a new config field, a version bump — needs
+  an activation, so restart the container or run `paperclipai plugin upgrade`
+  (`POST /api/plugins/{id}/upgrade`). Activation re-reads the manifest from the
+  package and persists it, so there is nothing to reinstall.
+- **Never change the manifest id.** Activation throws if the package's id stops
+  matching the installed plugin key.
+
 Then configure it in **Settings → Plugins → Home Assistant (read-only)**. The
 host generates that form from the manifest's `instanceConfigSchema`:
 
@@ -146,6 +191,11 @@ together they prove this plugin's behaviour — not any particular Home Assistan
 instance. Nothing here has touched a real Home Assistant or a running Paperclip
 host. The first real exercise is installing it and asking an agent to run
 `get_config`.
+
+The host behaviour described above — the risk-class inference, the gated fetch
+helper, and the install/upgrade mechanics — was read out of the Paperclip server
+source at `2026.1012.0` rather than observed on a running instance. It is
+accurate to that code and could change in a later release.
 
 ## License
 
