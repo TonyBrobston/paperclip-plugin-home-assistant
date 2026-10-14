@@ -1,0 +1,152 @@
+# paperclip-plugin-home-assistant
+
+Read-only Home Assistant access for [Paperclip](https://github.com/paperclipai/paperclip)
+agents. It exists so an agent can look things up in Home Assistant directly —
+entity IDs, live state, available services, template output, history — instead
+of asking a human to go and paste them.
+
+Nine tools, all reads:
+
+| Tool | What it answers |
+| --- | --- |
+| `list_entities` | What entities exist, with current state. Filter by domain or search term. |
+| `get_state` | One entity's full state object and every attribute. |
+| `list_services` | What services exist and what fields each accepts. |
+| `render_template` | What a Jinja2 template evaluates to against live state. |
+| `get_config` | Version, time zone, unit system, loaded components. |
+| `check_config` | Whether the current configuration validates. |
+| `get_history` | How an entity actually behaved over a time window. |
+| `get_logbook` | What happened, in human-readable form, and what triggered it. |
+| `get_error_log` | The tail of the error log. |
+
+There is no tool that changes anything. That is a deliberate design decision
+with a specific cause — see [Why this plugin is read-only](#why-this-plugin-is-read-only).
+
+## Install
+
+The plugin ships pre-built. `dist/` is committed and the bundler inlines the
+SDK, so the installed copy needs no `node_modules` and no build step on the
+host.
+
+```bash
+# 1. Put the package somewhere the Paperclip server can read. On a container
+#    deployment this must be a path inside the container — a persistent volume
+#    is the useful choice, because the plugin then survives an image rebuild.
+git clone https://github.com/TonyBrobston/paperclip-plugin-home-assistant.git
+
+# 2. Install it by absolute path.
+paperclipai plugin install /absolute/path/to/paperclip-plugin-home-assistant
+
+# 3. Confirm it loaded.
+paperclipai plugin list
+paperclipai plugin inspect tbro.home-assistant
+```
+
+Then configure it in **Settings → Plugins → Home Assistant (read-only)**. The
+host generates that form from the manifest's `instanceConfigSchema`:
+
+- **Home Assistant address** — what you open Home Assistant at, scheme and port
+  included and nothing else, e.g. `http://homeassistant.local:8123`. No path,
+  query string or credentials. `http` is accepted because the ordinary
+  deployment is a local address with no certificate.
+- **Long-lived access token** — create one in Home Assistant under your profile,
+  at the bottom of the Security tab. The field is a secret picker, so the token
+  is stored as a Paperclip secret reference and resolved at call time. It is
+  never written into plugin config as text.
+
+**A long-lived access token inherits every permission of the account that
+issued it.** Home Assistant cannot scope one to specific entities, domains, or
+to read-only. This plugin is read-only because of what it does and does not
+implement, not because the token is restricted — so issue the token from an
+account with only the access you are willing to expose.
+
+### Verifying the configuration
+
+The settings page's **Test Connection** button validates the *shape* of what you
+entered — that the address parses and that a secret reference is selected. It
+cannot contact Home Assistant: the host calls `validateConfig` without a
+company ID, and resolving the token reference requires one. The plugin says so
+in its own result rather than reporting a green "connected" it never tested.
+
+To confirm the instance is actually reachable and the token is accepted, ask an
+agent to run `get_config`.
+
+## Why this plugin is read-only
+
+Paperclip governs tool calls by risk class: `read`, `write`, `destructive`, with
+per-action Allowed / Ask-first / Off policy. A plugin tool cannot participate in
+that properly, for two independent reasons in the host as of Paperclip
+`2026.1012.0`:
+
+1. **A plugin cannot declare its risk class.** The manifest tool declaration is
+   `{name, displayName, description, parametersSchema}` and the host's internal
+   tool descriptor has no risk field either. The gateway spreads the tool and
+   then overwrites risk with `inferToolRisk(tool.name)`, a regex over the tool's
+   *name*. A Home Assistant `call_service` tool matches no keyword and so is
+   classified **`read`** — no Ask-first, no destructive handling, on the one
+   action that can unlock a lock.
+2. **Ask-first would not work even if set manually.** When a human approves a
+   gated call, the host runs it through `executeApprovedAgentInvocation`, and
+   for a plugin tool that path throws `approved_execution_unsupported`
+   ("Plugin actions cannot execute outside their originating run") — and the
+   caller swallows the error. The approval would appear to succeed and the
+   action would not run.
+
+So a write on the plugin path is either ungoverned or broken. Reads are neither:
+`read` is the correct class for every tool here, so the name inference lands on
+the right answer and the policy screen means what it says.
+
+If you want governed device control, that belongs in a curated catalog
+connector, where the risk class is declared and reviewed and approvals execute.
+
+## A note on outbound HTTP
+
+The plugin uses the worker runtime's own `fetch` rather than the SDK's
+`ctx.http` helper. This is not an oversight. The host's implementation of
+`http.fetch` resolves the target and drops every private or reserved address
+unconditionally — there is no deployment-exposure escape hatch, unlike the
+connector path — so a LAN or same-host Home Assistant fails with "All resolved
+IPs are in private/reserved ranges". A plugin worker is a forked Node process
+with ordinary network access, which is how this plugin reaches a local
+instance at all.
+
+Treat that as what it is: the plugin system's documented "trusted install, not
+a sandbox boundary" posture. Install plugins you trust.
+
+The client still behaves itself on that path: bearer auth, redirects refused so
+a redirect cannot carry the token off-host, a 25s timeout, an 8 MiB response
+ceiling, and error messages that never echo the configured address or the
+underlying request text back to the agent.
+
+## Development
+
+```bash
+npm install
+npm run typecheck
+npm test          # 50 unit tests
+npm run build     # writes dist/worker.js and dist/manifest.js
+node scripts/smoke.mjs
+```
+
+`scripts/smoke.mjs` is an end-to-end check: it forks the built worker the way
+the host does, plays the host side of the JSON-RPC protocol — answering the
+worker's `config.get` and `secrets.resolve` calls — and drives a real tool call
+against a stub Home Assistant on `127.0.0.1`. The loopback address is the point:
+it is exactly the case the host's gated fetch helper refuses.
+
+Commit `dist/*.js` when you change `src/`, since installs read the built
+output. Sourcemaps are generated but not committed — they are mostly inlined
+SDK source and would dwarf the rest of the repo; `npm run build` regenerates
+them locally.
+
+## What has not been verified
+
+The unit tests are fixture-backed and the smoke test runs against a stub, so
+together they prove this plugin's behaviour — not any particular Home Assistant
+instance. Nothing here has touched a real Home Assistant or a running Paperclip
+host. The first real exercise is installing it and asking an agent to run
+`get_config`.
+
+## License
+
+MIT

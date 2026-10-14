@@ -1,0 +1,201 @@
+// src/constants.ts
+var PLUGIN_ID = "tbro.home-assistant";
+var PLUGIN_VERSION = "0.1.0";
+var TOOL_NAMES = {
+  listEntities: "list_entities",
+  getState: "get_state",
+  listServices: "list_services",
+  renderTemplate: "render_template",
+  getConfig: "get_config",
+  checkConfig: "check_config",
+  getHistory: "get_history",
+  getLogbook: "get_logbook",
+  getErrorLog: "get_error_log"
+};
+var ENTITY_PAGE_MAX = 500;
+var LOG_TAIL_MAX_BYTES = 64 * 1024;
+var RESPONSE_LIMIT_BYTES = 8 * 1024 * 1024;
+var DEFAULT_WINDOW_MS = 24 * 60 * 60 * 1e3;
+var CONFIG_KEYS = {
+  baseUrl: "baseUrl",
+  token: "token"
+};
+
+// src/tools.ts
+var entityIdProperty = {
+  type: "string",
+  description: "Entity ID such as light.kitchen or sensor.outdoor_temperature.",
+  maxLength: 255
+};
+var startTimeProperty = {
+  type: "string",
+  description: "ISO 8601 start of the window. Defaults to 24 hours ago."
+};
+var endTimeProperty = {
+  type: "string",
+  description: "ISO 8601 end of the window. Defaults to now."
+};
+function object(properties, required = []) {
+  return {
+    type: "object",
+    properties,
+    ...required.length > 0 ? { required } : {},
+    additionalProperties: false
+  };
+}
+var TOOL_DECLARATIONS = [
+  {
+    name: TOOL_NAMES.listEntities,
+    displayName: "Home Assistant: list entities",
+    description: "List Home Assistant entities with their current state, optionally filtered by domain or a search term. Use this to find the entity ID for something instead of guessing it. Returns a compact row per entity; use get_state for an entity's full attributes.",
+    parametersSchema: object({
+      domain: {
+        type: "string",
+        description: "Restrict to one domain, such as light, sensor or binary_sensor.",
+        maxLength: 64
+      },
+      search: {
+        type: "string",
+        description: "Case-insensitive substring match on entity ID and friendly name.",
+        maxLength: 128
+      },
+      limit: {
+        type: "integer",
+        minimum: 1,
+        maximum: ENTITY_PAGE_MAX,
+        description: `Maximum rows to return (default ${ENTITY_PAGE_MAX}).`
+      }
+    })
+  },
+  {
+    name: TOOL_NAMES.getState,
+    displayName: "Home Assistant: get entity state",
+    description: "Get one entity's full current state object, including every attribute and its last-changed timestamp.",
+    parametersSchema: object({ entityId: entityIdProperty }, ["entityId"])
+  },
+  {
+    name: TOOL_NAMES.listServices,
+    displayName: "Home Assistant: list services",
+    description: "List the services Home Assistant exposes and the fields each one accepts, optionally filtered by domain. Use this to confirm a service name and its parameters before writing an automation that calls it.",
+    parametersSchema: object({
+      domain: {
+        type: "string",
+        description: "Restrict to one domain, such as light or climate.",
+        maxLength: 64
+      }
+    })
+  },
+  {
+    name: TOOL_NAMES.renderTemplate,
+    displayName: "Home Assistant: render template",
+    description: "Render a Jinja2 template against live state and return the result. Use this to check a value_template or a condition before committing it to YAML.",
+    parametersSchema: object(
+      {
+        template: {
+          type: "string",
+          description: "Template source, such as {{ states('sensor.outdoor_temperature') }}.",
+          maxLength: 8192
+        }
+      },
+      ["template"]
+    )
+  },
+  {
+    name: TOOL_NAMES.getConfig,
+    displayName: "Home Assistant: get configuration",
+    description: "Get the instance configuration: version, time zone, unit system, location name and loaded components.",
+    parametersSchema: object({})
+  },
+  {
+    name: TOOL_NAMES.checkConfig,
+    displayName: "Home Assistant: check configuration",
+    description: "Validate the current Home Assistant configuration and return any errors. Read-only: it checks the config on disk and changes nothing.",
+    parametersSchema: object({})
+  },
+  {
+    name: TOOL_NAMES.getHistory,
+    displayName: "Home Assistant: get entity history",
+    description: "Get recorded state history for one entity over a time window. Use this to see how something actually behaved rather than inferring it.",
+    parametersSchema: object(
+      {
+        entityId: entityIdProperty,
+        startTime: startTimeProperty,
+        endTime: endTimeProperty,
+        minimalResponse: {
+          type: "boolean",
+          description: "Return state changes without full attributes (default true, and much smaller)."
+        }
+      },
+      ["entityId"]
+    )
+  },
+  {
+    name: TOOL_NAMES.getLogbook,
+    displayName: "Home Assistant: get logbook",
+    description: "Get human-readable logbook entries over a time window, optionally for one entity \u2014 what happened and what triggered it.",
+    parametersSchema: object({
+      entityId: entityIdProperty,
+      startTime: startTimeProperty,
+      endTime: endTimeProperty
+    })
+  },
+  {
+    name: TOOL_NAMES.getErrorLog,
+    displayName: "Home Assistant: get error log",
+    description: "Get the tail of the Home Assistant error log. Use this to diagnose a failing integration or a broken automation.",
+    parametersSchema: object({
+      maxBytes: {
+        type: "integer",
+        minimum: 1024,
+        maximum: LOG_TAIL_MAX_BYTES,
+        description: `Bytes to return from the end of the log (default ${LOG_TAIL_MAX_BYTES}).`
+      }
+    })
+  }
+];
+
+// src/manifest.ts
+var manifest = {
+  id: PLUGIN_ID,
+  apiVersion: 1,
+  version: PLUGIN_VERSION,
+  displayName: "Home Assistant (read-only)",
+  description: "Read-only access to a Home Assistant instance: entity registry and live state, available services, template rendering, configuration, history, logbook and the error log. Lets an agent look things up directly instead of asking an operator to paste them.",
+  author: "Tony Brobston",
+  categories: ["connector"],
+  capabilities: ["http.outbound", "secrets.read-ref", "agent.tools.register"],
+  entrypoints: {
+    worker: "./dist/worker.js"
+  },
+  instanceConfigSchema: {
+    type: "object",
+    properties: {
+      [CONFIG_KEYS.baseUrl]: {
+        type: "string",
+        title: "Home Assistant address",
+        description: "The address you open Home Assistant at, including the scheme and port and nothing else \u2014 for example http://homeassistant.local:8123. No path, query string or credentials.",
+        // http is accepted because the ordinary deployment is a local address
+        // with no certificate.
+        pattern: "^https?://[^\\s/?#]+$"
+      },
+      [CONFIG_KEYS.token]: {
+        type: "string",
+        title: "Long-lived access token",
+        description: "Create one in Home Assistant under your profile, at the bottom of the Security tab. Stored as a Paperclip secret reference, not as text in this config.",
+        format: "secret-ref"
+      }
+    },
+    required: [CONFIG_KEYS.baseUrl, CONFIG_KEYS.token]
+  },
+  tools: TOOL_DECLARATIONS.map((tool) => ({
+    name: tool.name,
+    displayName: tool.displayName,
+    description: tool.description,
+    parametersSchema: tool.parametersSchema
+  }))
+};
+var manifest_default = manifest;
+export {
+  manifest_default as default
+};
+//# sourceMappingURL=manifest.js.map

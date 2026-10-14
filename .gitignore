@@ -1,0 +1,8 @@
+node_modules/
+*.log
+.DS_Store
+
+# dist/*.js is committed so installs need no build step. The sourcemaps are
+# not: they are mostly inlined SDK source and dwarf the rest of the repo.
+# Run `npm run build` to regenerate them locally.
+dist/*.map

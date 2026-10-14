@@ -1,0 +1,39 @@
+{
+  "name": "paperclip-plugin-home-assistant",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Read-only Home Assistant access for Paperclip agents: entity registry, live state, services, template rendering, configuration, history, logbook and error log.",
+  "scripts": {
+    "build": "node ./esbuild.config.mjs",
+    "dev": "node ./esbuild.config.mjs --watch",
+    "test": "vitest run --config ./vitest.config.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "paperclipPlugin": {
+    "manifest": "./dist/manifest.js",
+    "worker": "./dist/worker.js"
+  },
+  "files": [
+    "dist",
+    "src",
+    "README.md"
+  ],
+  "keywords": [
+    "paperclip",
+    "paperclip-plugin",
+    "home-assistant",
+    "connector"
+  ],
+  "author": "Tony Brobston",
+  "license": "MIT",
+  "devDependencies": {
+    "@paperclipai/plugin-sdk": "^2026.1012.0",
+    "@types/node": "^24.0.0",
+    "esbuild": "^0.28.2",
+    "typescript": "^5.7.3",
+    "vitest": "^3.0.5"
+  },
+  "allowScripts": {
+    "esbuild@0.28.2": true
+  }
+}
