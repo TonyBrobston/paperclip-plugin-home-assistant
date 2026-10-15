@@ -42040,6 +42040,7 @@ function startWorkerRpcHost(options) {
 }
 
 // src/constants.ts
+var PLUGIN_ID = "tbro.home-assistant";
 var TOOL_NAMES = {
   listEntities: "list_entities",
   getState: "get_state",
@@ -42051,6 +42052,9 @@ var TOOL_NAMES = {
   getLogbook: "get_logbook",
   getErrorLog: "get_error_log"
 };
+var NAMESPACED_TOOL_NAMES = Object.values(
+  TOOL_NAMES
+).map((name) => `${PLUGIN_ID}:${name}`);
 var ENTITY_PAGE_MAX = 500;
 var LOG_TAIL_MAX_BYTES = 64 * 1024;
 var RESPONSE_LIMIT_BYTES = 8 * 1024 * 1024;
@@ -42529,6 +42533,13 @@ var TOOL_DECLARATIONS = [
 ];
 
 // src/worker.ts
+var TOOL_GRANT_WARNING = [
+  "Enabling this plugin does not grant its tools to any agent \u2014 Paperclip denies a plugin tool until a tool profile allows it, and activation never creates one.",
+  'In Connectors \u2192 Profiles (/apps/advanced/profiles), create a profile with one Allow rule per tool, kind "tool name", and assign it to the agents that need these tools:',
+  NAMESPACED_TOOL_NAMES.join(", ") + ".",
+  'The field is labelled "pattern", but the server compares names literally, so a wildcard rule matches nothing.',
+  'See the plugin README, "Granting the tools to an agent".'
+].join(" ");
 function isSecretRefBinding(value) {
   return value !== null && typeof value === "object" && !Array.isArray(value) && value.type === "secret_ref" && typeof value.secretId === "string";
 }
@@ -42636,7 +42647,8 @@ var plugin = definePlugin({
     return {
       ok: true,
       warnings: [
-        "Address and token reference look valid. This check does not contact Home Assistant \u2014 ask an agent to run get_config to confirm the instance is reachable and the token is accepted."
+        "Address and token reference look valid. This check does not contact Home Assistant \u2014 ask an agent to run get_config to confirm the instance is reachable and the token is accepted.",
+        TOOL_GRANT_WARNING
       ]
     };
   }

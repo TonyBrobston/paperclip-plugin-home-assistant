@@ -34,6 +34,20 @@ export const TOOL_NAMES = {
 
 export type ToolName = (typeof TOOL_NAMES)[keyof typeof TOOL_NAMES];
 
+/**
+ * The same names as the host publishes them, e.g.
+ * `tbro.home-assistant:list_entities`.
+ *
+ * These are what a tool profile rule has to say, one rule per name, before any
+ * agent can call a tool here at all. Nothing in the product lists them: a
+ * plugin tool has no connection and no tool catalog entry, so the profile
+ * wizard's tool picker — which is built per connection — cannot show them, and
+ * they have to be typed. See README "Granting the tools to an agent".
+ */
+export const NAMESPACED_TOOL_NAMES: readonly string[] = Object.values(
+  TOOL_NAMES,
+).map((name) => `${PLUGIN_ID}:${name}`);
+
 /** Caps a `/api/states` response so a large installation cannot flood a run. */
 export const ENTITY_PAGE_MAX = 500;
 

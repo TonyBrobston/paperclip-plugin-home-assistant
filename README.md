@@ -42,6 +42,12 @@ paperclipai plugin list
 paperclipai plugin inspect tbro.home-assistant
 ```
 
+Installing, configuring and enabling it is **not** enough to make the tools
+callable — a loaded, healthy, enabled plugin is still denied to every agent
+until someone writes a tool profile for it. That step is
+[Granting the tools to an agent](#granting-the-tools-to-an-agent), and skipping
+it is the single most likely reason an agent tells you these tools do not work.
+
 If the CLI is not in your image, the route the CLI calls is
 `POST /api/plugins/install` with `{"packageName": "<absolute path>",
 "isLocalPath": true}`, instance-admin only.
@@ -192,7 +198,68 @@ company ID, and resolving the token reference requires one. The plugin says so
 in its own result rather than reporting a green "connected" it never tested.
 
 To confirm the instance is actually reachable and the token is accepted, ask an
-agent to run `get_config`.
+agent to run `get_config`. If the agent reports that the tools do not exist, or
+that the call was denied, the plugin is fine and the grant below is missing.
+
+## Granting the tools to an agent
+
+**Installing, configuring and enabling the plugin does not let a single agent
+call a single tool.** The plugin will show `ready` with green health, the worker
+will be running, the nine tools will be registered — and every call is denied,
+because Paperclip denies any tool call that no tool profile, grant or allow
+policy permits, and plugin activation creates none of the three. Nothing warns
+you. The agent sees a bare default deny that does not mention plugins, and an
+agent that was never given the tools usually reports them as simply absent.
+
+Verified against Paperclip `2026.1012.0`. The fix is one profile, written by
+hand.
+
+**Connectors → Profiles**, at `/apps/advanced/profiles` — in the page's own
+**Developer** sidebar group, under Connections and Gateways. It needs
+`tools:admin`, so an agent cannot do this for you.
+
+1. **New profile**, name it for the agents it serves, e.g.
+   `Home Assistant plugin tools`.
+2. In **Choose tools**, tick nothing in the app list — the picker is built from
+   per-connection tool catalogs, and a plugin tool has no connection, so these
+   nine will not be in it. Expand **Advanced rules** and add one rule per tool:
+   effect **Allow**, kind **tool name**, value one of
+
+   ```
+   tbro.home-assistant:list_entities
+   tbro.home-assistant:get_state
+   tbro.home-assistant:list_services
+   tbro.home-assistant:render_template
+   tbro.home-assistant:get_config
+   tbro.home-assistant:check_config
+   tbro.home-assistant:get_history
+   tbro.home-assistant:get_logbook
+   tbro.home-assistant:get_error_log
+   ```
+
+   Leave **New tools** on *Deny*.
+3. **Assign** it to the agents that should have Home Assistant access, and only
+   those.
+
+Three things about that screen are worth knowing before you use it:
+
+- **The tool-name field is matched literally, despite the label.** It is called
+  a pattern and placeholdered with a glob, and the server compares it to the
+  tool name with string equality. `tbro.home-assistant:*` saves cleanly, shows
+  up as a rule, and grants nothing. It has to be the nine exact names.
+- **Only two of the five rule kinds can ever match a plugin tool.** The others
+  select on connection, application or catalog entry, and a plugin tool call
+  carries `null` for all three. So it is a tool-name rule or a risk-level rule;
+  nothing else will work however correctly you fill it in.
+- **A single Allow / risk level / read-only rule also grants the set**, since
+  all nine tools infer as reads. It is one rule instead of nine, and it is
+  looser — that profile then permits any read tool, including ones added later.
+
+Profiles are additive: the decision walks each profile that applies and allows
+on the first that permits, so a new narrow profile cannot disturb tools an agent
+already has. Do not grant these by flipping an existing profile's **New tools**
+to *Allow* — that sets the profile's default action to allow and grants
+everything, permanently, including tools that do not exist yet.
 
 ## Why this plugin is read-only
 
@@ -312,6 +379,15 @@ formats plus the host's permissive `secret-ref` format, assembled the same way
 `plugin-config-validator.ts` assembles it — so the set of values the settings
 form will accept is asserted rather than assumed. That is a faithful copy of
 the validator, not a live save against a running instance.
+
+The deny-by-default behaviour in [Granting the tools to an
+agent](#granting-the-tools-to-an-agent) was observed, not inferred: on a
+running `2026.1012.0` instance with this plugin `ready` and its worker up, the
+assigned tool catalogue for an agent held 164 tools and none of them were
+plugin tools, and calls were refused as a default deny. **The remedy — the
+profile and its rules — has not been executed yet**, only read out of the
+policy engine and the profiles UI at that version. Expect the field labels to
+be the part that drifts.
 
 It has now been installed on a running self-hosted Paperclip at `2026.1012.0`,
 and that install is where the dialog defect, the npm-name resolution and the
