@@ -44,8 +44,15 @@ paperclipai plugin inspect tbro.home-assistant
 
 If the CLI is not in your image, the route the CLI calls is
 `POST /api/plugins/install` with `{"packageName": "<absolute path>",
-"isLocalPath": true}`, instance-admin only. Settings → Plugins does the same
-thing from the UI.
+"isLocalPath": true}`, instance-admin only.
+
+**Settings → Plugins cannot do this on `2026.1012.0`.** Its install dialog sends
+`{ packageName }` and never sets `isLocalPath`, so a directory typed into it is
+handed to `npm install` and fails — on a missing `package.json` if the directory
+is empty, and otherwise on `Package directory not found after installation`,
+because the loader joins the absolute path into `node_modules`. Neither error
+names the missing flag. Use the CLI or the route above until your host carries
+the fix.
 
 Two install-time constraints are worth knowing before you try:
 
@@ -79,13 +86,42 @@ Upgrading is `git pull` in that directory, plus a restart if the manifest moved:
 
 - **Code-only change** (handler logic in `src/`, rebuilt into `dist/`) takes
   effect on its own. The host watches the installed package path and restarts
-  the worker when its files change.
+  the worker when its files change — but only for a plugin whose record carries
+  that path, which means a local-path install. See the note below.
 - **Manifest change** — a new tool, a new config field, a version bump — needs
   an activation, so restart the container or run `paperclipai plugin upgrade`
   (`POST /api/plugins/{id}/upgrade`). Activation re-reads the manifest from the
   package and persists it, so there is nothing to reinstall.
 - **Never change the manifest id.** Activation throws if the package's id stops
   matching the installed plugin key.
+
+#### If you installed it by package name instead of by path
+
+There is a second way this package can end up installed, and it behaves
+differently. The host runs `npm install <name> --prefix <plugin root> --save`,
+so if that prefix's `package.json` already carries a `file:` dependency on this
+package — which a previous local-path attempt leaves behind — npm resolves the
+bare name to that link rather than to the registry. The install succeeds and
+loads your clone through the symlink. This package is not published to npm, so
+that is the only way a bare name can resolve at all.
+
+What you get is a working install with three differences:
+
+- The record's source is npm, and the host only persists `packagePath` for a
+  local-filesystem source. So there is **no dev watcher**: a `git pull` changes
+  the files and nothing restarts the worker. Restart the container, or call
+  `POST /api/plugins/{id}/upgrade`, which repeats the same resolution and
+  re-reads the clone.
+- It still survives a restart. Boot discovery scans the plugin root's
+  `node_modules` for packages matching the `paperclip-plugin-*` naming
+  convention and follows the symlink, so the clone is found without a recorded
+  path.
+- It depends on that `file:` entry staying in the prefix's `package.json`. If
+  anything rewrites the file without it, the next install or upgrade of the name
+  goes to the public registry and fails.
+
+Reinstalling by absolute path replaces the record with a local-filesystem one
+and restores the watcher on the next boot.
 
 Then configure it in **Settings → Plugins → Home Assistant (read-only)**. The
 host generates that form from the manifest's `instanceConfigSchema`:
@@ -188,14 +224,15 @@ them locally.
 
 The unit tests are fixture-backed and the smoke test runs against a stub, so
 together they prove this plugin's behaviour — not any particular Home Assistant
-instance. Nothing here has touched a real Home Assistant or a running Paperclip
-host. The first real exercise is installing it and asking an agent to run
-`get_config`.
+instance. **Nothing here has touched a real Home Assistant.** The first real
+exercise is configuring it and asking an agent to run `get_config`.
 
-The host behaviour described above — the risk-class inference, the gated fetch
-helper, and the install/upgrade mechanics — was read out of the Paperclip server
-source at `2026.1012.0` rather than observed on a running instance. It is
-accurate to that code and could change in a later release.
+It has now been installed on a running self-hosted Paperclip at `2026.1012.0`,
+and that install is where the dialog defect, the npm-name resolution and the
+symlinked package path above are described from. The rest of the host behaviour
+— the risk-class inference, the gated fetch helper, the activation guards and
+the upgrade mechanics — was read out of the server source at that version rather
+than observed. It is accurate to that code and could change in a later release.
 
 ## License
 
