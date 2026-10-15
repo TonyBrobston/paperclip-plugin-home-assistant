@@ -5,7 +5,12 @@ import {
   HomeAssistantError,
   type FetchLike,
 } from "../src/home-assistant.js";
-import { ENTITY_PAGE_MAX, LOG_TAIL_MAX_BYTES, TOOL_NAMES } from "../src/constants.js";
+import {
+  ENTITY_PAGE_MAX,
+  EVENT_PAGE_MAX,
+  LOG_TAIL_MAX_BYTES,
+  TOOL_NAMES,
+} from "../src/constants.js";
 import { InvalidParameterError } from "../src/validate.js";
 
 const BASE_URL = "http://home-assistant.test:8123";
@@ -435,5 +440,131 @@ describe("window-shaped results carry their request back", () => {
     await expect(
       executeTool(options, TOOL_NAMES.getLogbook, {}),
     ).rejects.toThrow(/unexpected logbook response/);
+  });
+});
+
+/**
+ * A result the agent cannot read is as lost as one the client discards.
+ * An unfiltered `get_logbook` over the default 24-hour window measured 5.6 MB
+ * against a real installation — more tokens than any model holds — and the
+ * whole-installation service catalog measured 351 KB. Neither was capped;
+ * `RESPONSE_LIMIT_BYTES` only guards the worker's own memory, at 8 MB.
+ */
+describe("results stay small enough for a run to read", () => {
+  const logbookEntry = (index: number) => ({
+    when: new Date(Date.UTC(2026, 9, 14, 0, 0, index)).toISOString(),
+    name: "Garage West Motion",
+    message: `event ${index}`,
+  });
+
+  it("get_logbook keeps the newest page and says how much it dropped", async () => {
+    const entries = Array.from({ length: EVENT_PAGE_MAX + 250 }, (_, i) => logbookEntry(i));
+    const { options } = recorder([entries]);
+    const result = (await executeTool(options, TOOL_NAMES.getLogbook, {})) as {
+      totalMatched: number;
+      returned: number;
+      truncated: boolean;
+      entries: Array<{ message: string }>;
+    };
+    expect(result.totalMatched).toBe(EVENT_PAGE_MAX + 250);
+    expect(result.returned).toBe(EVENT_PAGE_MAX);
+    expect(result.truncated).toBe(true);
+    // Oldest-first upstream, so the useful end is the tail.
+    expect(result.entries[result.entries.length - 1]!.message).toBe(
+      `event ${EVENT_PAGE_MAX + 249}`,
+    );
+    expect(result.entries[0]!.message).toBe(`event ${250}`);
+  });
+
+  it("a whole-installation logbook cannot flood the run", async () => {
+    const entries = Array.from({ length: 20_000 }, (_, i) => logbookEntry(i));
+    const { options } = recorder([entries]);
+    const result = await executeTool(options, TOOL_NAMES.getLogbook, {});
+    const upstream = JSON.stringify(entries).length;
+    const forwarded = JSON.stringify(result).length;
+    expect(upstream).toBeGreaterThan(1_000_000);
+    expect(forwarded).toBeLessThan(200_000);
+  });
+
+  it("get_logbook does not claim truncation for a short window", async () => {
+    const { options } = recorder([[logbookEntry(0)]]);
+    const result = (await executeTool(options, TOOL_NAMES.getLogbook, {})) as Record<
+      string,
+      unknown
+    >;
+    expect(result.totalMatched).toBe(1);
+    expect(result.returned).toBe(1);
+    expect(result.truncated).toBe(false);
+  });
+
+  it("get_history honours an explicit limit and keeps the newest changes", async () => {
+    const rows = Array.from({ length: 10 }, (_, i) => ({
+      ...state("light.kitchen", i % 2 === 0 ? "on" : "off"),
+      last_changed: `2026-10-14T00:00:0${i}Z`,
+    }));
+    const { options } = recorder([[rows]]);
+    const result = (await executeTool(options, TOOL_NAMES.getHistory, {
+      entityId: "light.kitchen",
+      limit: 3,
+    })) as {
+      totalMatched: number;
+      returned: number;
+      truncated: boolean;
+      changes: Array<{ last_changed: string }>;
+    };
+    expect(result.totalMatched).toBe(10);
+    expect(result.returned).toBe(3);
+    expect(result.truncated).toBe(true);
+    expect(result.changes.map((row) => row.last_changed)).toEqual([
+      "2026-10-14T00:00:07Z",
+      "2026-10-14T00:00:08Z",
+      "2026-10-14T00:00:09Z",
+    ]);
+  });
+
+  it.each([TOOL_NAMES.getHistory, TOOL_NAMES.getLogbook])(
+    "%s rejects a limit above the documented cap",
+    async (tool) => {
+      const { options } = recorder([[]]);
+      await expect(
+        executeTool(options, tool, { entityId: "light.kitchen", limit: EVENT_PAGE_MAX + 1 }),
+      ).rejects.toThrow(InvalidParameterError);
+    },
+  );
+
+  it("list_services returns names only when no domain narrows it", async () => {
+    const catalog = [
+      { domain: "light", services: { turn_on: { fields: { brightness: {} } }, turn_off: {} } },
+      { domain: "climate", services: { set_temperature: { fields: { temperature: {} } } } },
+    ];
+    const { options } = recorder([catalog]);
+    const result = (await executeTool(options, TOOL_NAMES.listServices, {})) as {
+      domain: string | null;
+      detail: string;
+      returned: number;
+      domains: Array<{ domain: string; services: string[] }>;
+    };
+    expect(result.domain).toBeNull();
+    expect(result.detail).toBe("names");
+    expect(result.returned).toBe(2);
+    expect(result.domains).toEqual([
+      { domain: "light", services: ["turn_on", "turn_off"] },
+      { domain: "climate", services: ["set_temperature"] },
+    ]);
+    // The field schemas are the bulk, and they are what a browse call drops.
+    expect(JSON.stringify(result)).not.toContain("brightness");
+  });
+
+  it("list_services returns the full field schemas for one domain", async () => {
+    const catalog = [
+      { domain: "light", services: { turn_on: { fields: { brightness: {} } } } },
+      { domain: "climate", services: { set_temperature: {} } },
+    ];
+    const { options } = recorder([catalog]);
+    const result = (await executeTool(options, TOOL_NAMES.listServices, {
+      domain: "light",
+    })) as { detail: string; domains: unknown[] };
+    expect(result.detail).toBe("full");
+    expect(result.domains).toEqual([catalog[0]]);
   });
 });

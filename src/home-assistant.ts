@@ -10,6 +10,7 @@
 import {
   DEFAULT_WINDOW_MS,
   ENTITY_PAGE_MAX,
+  EVENT_PAGE_MAX,
   LOG_TAIL_MAX_BYTES,
   REQUEST_TIMEOUT_MS,
   RESPONSE_LIMIT_BYTES,
@@ -229,6 +230,38 @@ function flattenHistory(value: unknown): unknown[] {
   return series;
 }
 
+/**
+ * The newest `limit` rows, in the order Home Assistant gave them.
+ *
+ * History and logbook come back oldest first, so a head slice would drop the
+ * events closest to whatever question prompted the call. Keeping the tail
+ * keeps "what just happened" answerable from a truncated page.
+ */
+function mostRecent(rows: readonly unknown[], limit: number): unknown[] {
+  return rows.length <= limit ? [...rows] : rows.slice(rows.length - limit);
+}
+
+/**
+ * `{ domain, services: { turn_on: { fields: … } } }` reduced to its names.
+ *
+ * A whole-installation service catalog is mostly per-service field schemas —
+ * 351 KB of them on a real instance. A caller with no domain filter is
+ * browsing for a name, so answer with the names and let them ask again for
+ * the one domain they want.
+ */
+function serviceNames(entry: unknown): unknown {
+  if (entry === null || typeof entry !== "object") return entry;
+  const record = entry as { domain?: unknown; services?: unknown };
+  const services = record.services;
+  return {
+    domain: record.domain ?? null,
+    services:
+      services !== null && typeof services === "object"
+        ? Object.keys(services as Record<string, unknown>)
+        : [],
+  };
+}
+
 /** The documented liveness endpoint. It requires the token, so a success proves both reachability and a valid credential without reading household data. */
 export async function probe(options: ClientOptions): Promise<void> {
   await call(options, "/api/");
@@ -283,7 +316,7 @@ export async function executeTool(
         parseJson(await run("/api/services")),
         "service list",
       );
-      const domains = domainFilter
+      const matched = domainFilter
         ? services.filter(
             (entry) =>
               entry !== null &&
@@ -291,10 +324,14 @@ export async function executeTool(
               (entry as { domain?: unknown }).domain === domainFilter,
           )
         : services;
+      // Full field schemas for every domain at once do not fit in a run's
+      // context. Narrowing to one domain is what makes them affordable.
+      const detail = domainFilter ? "full" : "names";
       return {
         domain: domainFilter ?? null,
-        returned: domains.length,
-        domains,
+        detail,
+        returned: matched.length,
+        domains: detail === "full" ? matched : matched.map(serviceNames),
       };
     }
 
@@ -316,13 +353,20 @@ export async function executeTool(
     }
 
     case TOOL_NAMES.getHistory: {
-      rejectUnknownKeys(params, ["entityId", "startTime", "endTime", "minimalResponse"]);
+      rejectUnknownKeys(params, [
+        "entityId",
+        "startTime",
+        "endTime",
+        "limit",
+        "minimalResponse",
+      ]);
       const id = entityId(requiredString(params, "entityId", 255), "entityId");
       const { start, end } = window(
         optionalTimestamp(params, "startTime"),
         optionalTimestamp(params, "endTime"),
       );
       const minimal = optionalBoolean(params, "minimalResponse") ?? true;
+      const limit = optionalInteger(params, "limit", 1, EVENT_PAGE_MAX) ?? EVENT_PAGE_MAX;
       const query = new URLSearchParams({ filter_entity_id: id });
       if (end) query.set("end_time", end);
       // Home Assistant treats the bare presence of this key as the flag.
@@ -332,24 +376,28 @@ export async function executeTool(
           await run(`/api/history/period/${encodeURIComponent(start)}?${query.toString()}`),
         ),
       );
+      const page = mostRecent(changes, limit);
       return {
         entityId: id,
         start,
         end: end ?? null,
         minimalResponse: minimal,
-        returned: changes.length,
-        changes,
+        totalMatched: changes.length,
+        returned: page.length,
+        truncated: changes.length > page.length,
+        changes: page,
       };
     }
 
     case TOOL_NAMES.getLogbook: {
-      rejectUnknownKeys(params, ["entityId", "startTime", "endTime"]);
+      rejectUnknownKeys(params, ["entityId", "startTime", "endTime", "limit"]);
       const rawId = optionalString(params, "entityId", 255);
       const id = rawId === undefined ? undefined : entityId(rawId, "entityId");
       const { start, end } = window(
         optionalTimestamp(params, "startTime"),
         optionalTimestamp(params, "endTime"),
       );
+      const limit = optionalInteger(params, "limit", 1, EVENT_PAGE_MAX) ?? EVENT_PAGE_MAX;
       const query = new URLSearchParams();
       if (id) query.set("entity", id);
       if (end) query.set("end_time", end);
@@ -360,12 +408,15 @@ export async function executeTool(
         ),
         "logbook response",
       );
+      const page = mostRecent(entries, limit);
       return {
         entityId: id ?? null,
         start,
         end: end ?? null,
-        returned: entries.length,
-        entries,
+        totalMatched: entries.length,
+        returned: page.length,
+        truncated: entries.length > page.length,
+        entries: page,
       };
     }
 

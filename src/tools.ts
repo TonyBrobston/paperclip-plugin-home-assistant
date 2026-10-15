@@ -6,7 +6,12 @@
  * handler or registered without being declared.
  */
 
-import { ENTITY_PAGE_MAX, LOG_TAIL_MAX_BYTES, TOOL_NAMES } from "./constants.js";
+import {
+  ENTITY_PAGE_MAX,
+  EVENT_PAGE_MAX,
+  LOG_TAIL_MAX_BYTES,
+  TOOL_NAMES,
+} from "./constants.js";
 
 export interface ToolDeclaration {
   name: string;
@@ -29,6 +34,13 @@ const startTimeProperty = {
 const endTimeProperty = {
   type: "string",
   description: "ISO 8601 end of the window. Defaults to now.",
+} as const;
+
+const eventLimitProperty = {
+  type: "integer",
+  minimum: 1,
+  maximum: EVENT_PAGE_MAX,
+  description: `Maximum rows to return, newest kept (default ${EVENT_PAGE_MAX}).`,
 } as const;
 
 function object(
@@ -79,7 +91,7 @@ export const TOOL_DECLARATIONS: readonly ToolDeclaration[] = [
     name: TOOL_NAMES.listServices,
     displayName: "Home Assistant: list services",
     description:
-      "List the services Home Assistant exposes and the fields each one accepts, optionally filtered by domain. Use this to confirm a service name and its parameters before writing an automation that calls it.",
+      "List the services Home Assistant exposes, optionally filtered by domain. Use this to confirm a service name and its parameters before writing an automation that calls it. Without a domain it returns service names only; pass a domain to get that domain's full field schemas, which are too large to return for every domain at once.",
     parametersSchema: object({
       domain: {
         type: "string",
@@ -128,6 +140,7 @@ export const TOOL_DECLARATIONS: readonly ToolDeclaration[] = [
         entityId: entityIdProperty,
         startTime: startTimeProperty,
         endTime: endTimeProperty,
+        limit: eventLimitProperty,
         minimalResponse: {
           type: "boolean",
           description:
@@ -141,11 +154,12 @@ export const TOOL_DECLARATIONS: readonly ToolDeclaration[] = [
     name: TOOL_NAMES.getLogbook,
     displayName: "Home Assistant: get logbook",
     description:
-      "Get human-readable logbook entries over a time window, optionally for one entity — what happened and what triggered it.",
+      "Get human-readable logbook entries over a time window, optionally for one entity — what happened and what triggered it. Filter by entity where you can: a whole-installation logbook runs to thousands of entries, and only the newest page is returned.",
     parametersSchema: object({
       entityId: entityIdProperty,
       startTime: startTimeProperty,
       endTime: endTimeProperty,
+      limit: eventLimitProperty,
     }),
   },
   {

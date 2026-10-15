@@ -11,7 +11,7 @@ Nine tools, all reads:
 | --- | --- |
 | `list_entities` | What entities exist, with current state. Filter by domain or search term. |
 | `get_state` | One entity's full state object and every attribute. |
-| `list_services` | What services exist and what fields each accepts. |
+| `list_services` | What services exist; pass a domain for the fields each accepts. |
 | `render_template` | What a Jinja2 template evaluates to against live state. |
 | `get_config` | Version, time zone, unit system, loaded components. |
 | `check_config` | Whether the current configuration validates. |
@@ -314,11 +314,12 @@ included, before the agent reads any of it:
 - a scalar or `null`;
 - an absent `data`, which the host forwards as an explicit `null`.
 
-So `get_history` returns `{ entityId, start, end, minimalResponse, returned,
-changes }`, `get_logbook` returns `{ entityId, start, end, returned, entries }`,
-and `list_services` returns `{ domain, returned, domains }`. `get_history` also
-flattens Home Assistant's per-entity series, since the tool requires one entity
-and therefore gets at most one series.
+So `get_history` returns `{ entityId, start, end, minimalResponse,
+totalMatched, returned, truncated, changes }`, `get_logbook` returns
+`{ entityId, start, end, totalMatched, returned, truncated, entries }`, and
+`list_services` returns `{ domain, detail, returned, domains }`. `get_history`
+also flattens Home Assistant's per-entity series, since the tool requires one
+entity and therefore gets at most one series.
 
 The same rule governs the failure path. A result carrying only `error` travels
 in neither forwarded field, so `toolError` sets `content` and `data` alongside
@@ -332,6 +333,32 @@ drops it.
 `worker.ts` keeps a `structured()` backstop at the one place the host reads, and
 both the unit suite and `scripts/smoke.mjs` carry a copy of the host's
 forwarding rule, so a future tool cannot reintroduce the fault quietly.
+
+## Why every result is also small
+
+A result the agent cannot read is as lost as one the client discards, and the
+second ceiling is far lower than the first. Measured against a real
+installation: an unfiltered `get_logbook` over the default 24-hour window came
+back at **5.6 MB** — more tokens than any model holds — and the
+whole-installation service catalog at **351 KB**, nearly all of it per-service
+field schemas. Neither was capped. `RESPONSE_LIMIT_BYTES` sits at 8 MB and
+guards the worker's memory, not a run's context.
+
+- `get_history` and `get_logbook` return at most `EVENT_PAGE_MAX` (500) rows,
+  lowerable with `limit`, and report `totalMatched` and `truncated` so a short
+  page is never mistaken for a quiet window. The **newest** rows are the ones
+  kept: both endpoints answer oldest-first, so a head slice would drop the
+  events closest to whatever question prompted the call.
+- `list_services` without a `domain` returns service **names** only, and says
+  so with `detail: "names"`. Pass a `domain` for that domain's full field
+  schemas (`detail: "full"`). Browsing for a name does not need the schemas;
+  writing a service call needs one domain's worth.
+- `list_entities` caps at `ENTITY_PAGE_MAX` (500) and `get_error_log` at
+  `LOG_TAIL_MAX_BYTES` (64 KB). Both already did; these were the models.
+
+A test feeds 20,000 logbook entries through `executeTool` and asserts the
+forwarded result stays two orders of magnitude smaller than the upstream body,
+so a tool that stops paging fails here rather than in a run.
 
 ## A note on outbound HTTP
 

@@ -51,6 +51,16 @@ export const NAMESPACED_TOOL_NAMES: readonly string[] = Object.values(
 /** Caps a `/api/states` response so a large installation cannot flood a run. */
 export const ENTITY_PAGE_MAX = 500;
 
+/**
+ * Caps the rows `get_history` and `get_logbook` return in one call.
+ *
+ * `RESPONSE_LIMIT_BYTES` guards the worker's memory. This guards the agent's
+ * context window, which is far smaller: an unfiltered logbook over the default
+ * 24-hour window measured 5.6 MB on a real installation, which no model can
+ * hold. A result the agent cannot read is as lost as one the client discards.
+ */
+export const EVENT_PAGE_MAX = 500;
+
 /** Home Assistant returns the error log as plaintext with no paging. */
 export const LOG_TAIL_MAX_BYTES = 64 * 1024;
 
