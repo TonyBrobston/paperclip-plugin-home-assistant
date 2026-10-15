@@ -7,7 +7,7 @@ import {
   type ToolResult,
   type ToolRunContext,
 } from "@paperclipai/plugin-sdk";
-import { CONFIG_KEYS } from "./constants.js";
+import { CONFIG_KEYS, NAMESPACED_TOOL_NAMES } from "./constants.js";
 import {
   executeTool,
   homeAssistantApiUrl,
@@ -16,6 +16,28 @@ import {
   type ClientOptions,
 } from "./home-assistant.js";
 import { TOOL_DECLARATIONS } from "./tools.js";
+
+/**
+ * Said on every successful validation, because nothing else says it.
+ *
+ * Configuring the plugin and enabling it is not enough to make a single tool
+ * callable. Paperclip denies a tool call that no tool profile, grant or allow
+ * policy permits, and plugin activation does not create any of the three — so
+ * the tools are registered, healthy, and denied to every agent until an
+ * operator writes a profile by hand. The denial is reported to the agent as a
+ * default deny with no mention of plugins, and the settings page shows a green
+ * `ready`, so there is no other surface where an operator would find this out.
+ *
+ * Test Connection is the one place the plugin gets to talk to the person who
+ * just configured it, so it is where this belongs.
+ */
+const TOOL_GRANT_WARNING = [
+  "Enabling this plugin does not grant its tools to any agent — Paperclip denies a plugin tool until a tool profile allows it, and activation never creates one.",
+  "In Connectors → Profiles (/apps/advanced/profiles), create a profile with one Allow rule per tool, kind \"tool name\", and assign it to the agents that need these tools:",
+  NAMESPACED_TOOL_NAMES.join(", ") + ".",
+  'The field is labelled "pattern", but the server compares names literally, so a wildcard rule matches nothing.',
+  'See the plugin README, "Granting the tools to an agent".',
+].join(" ");
 
 function isSecretRefBinding(value: unknown): value is EnvSecretRefBinding {
   return (
@@ -192,6 +214,7 @@ const plugin = definePlugin({
       ok: true,
       warnings: [
         "Address and token reference look valid. This check does not contact Home Assistant — ask an agent to run get_config to confirm the instance is reachable and the token is accepted.",
+        TOOL_GRANT_WARNING,
       ],
     };
   },

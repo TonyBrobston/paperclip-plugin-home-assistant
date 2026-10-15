@@ -12,6 +12,9 @@ var TOOL_NAMES = {
   getLogbook: "get_logbook",
   getErrorLog: "get_error_log"
 };
+var NAMESPACED_TOOL_NAMES = Object.values(
+  TOOL_NAMES
+).map((name) => `${PLUGIN_ID}:${name}`);
 var ENTITY_PAGE_MAX = 500;
 var LOG_TAIL_MAX_BYTES = 64 * 1024;
 var RESPONSE_LIMIT_BYTES = 8 * 1024 * 1024;

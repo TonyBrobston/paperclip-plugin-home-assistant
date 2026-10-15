@@ -4,7 +4,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import manifest from "../src/manifest.js";
 import plugin from "../src/worker.js";
 import { TOOL_DECLARATIONS } from "../src/tools.js";
-import { TOOL_NAMES } from "../src/constants.js";
+import { NAMESPACED_TOOL_NAMES, TOOL_NAMES } from "../src/constants.js";
 
 const TOKEN_REF = { type: "secret_ref" as const, secretId: "secret-1" };
 const CONFIG = { baseUrl: "http://home-assistant.test:8123", token: TOKEN_REF };
@@ -183,6 +183,23 @@ describe("onValidateConfig", () => {
     const result = await plugin.definition.onValidateConfig!(CONFIG);
     expect(result.ok).toBe(true);
     expect(result.warnings?.join(" ")).toMatch(/does not contact Home Assistant/);
+  });
+
+  // Test Connection is the only moment the plugin can tell the person who
+  // configured it that configuring it was not enough. An operator who misses
+  // this reads `ready` + green health as working and has no way to find out
+  // otherwise, so assert the text is there and that it carries every exact
+  // name a profile rule has to be given.
+  it("tells the operator the tools are still denied until a profile grants them", async () => {
+    const result = await plugin.definition.onValidateConfig!(CONFIG);
+    const warnings = result.warnings?.join(" ") ?? "";
+    expect(warnings).toMatch(/does not grant its tools/);
+    expect(warnings).toMatch(/Profiles/);
+    expect(warnings).toMatch(/wildcard rule matches nothing/);
+    for (const name of NAMESPACED_TOOL_NAMES) {
+      expect(warnings).toContain(name);
+    }
+    expect(NAMESPACED_TOOL_NAMES).toHaveLength(TOOL_DECLARATIONS.length);
   });
 
   it("rejects an address with no scheme", async () => {
