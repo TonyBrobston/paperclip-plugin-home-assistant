@@ -42538,6 +42538,7 @@ var TOOL_GRANT_WARNING = [
   'In Connectors \u2192 Profiles (/apps/advanced/profiles), create a profile with one Allow rule per tool, kind "tool name", and assign it to the agents that need these tools:',
   NAMESPACED_TOOL_NAMES.join(", ") + ".",
   'The field is labelled "pattern", but the server compares names literally, so a wildcard rule matches nothing.',
+  "You only write the rules once: the same profile can be bound to further agents, or to the whole company, without retyping them.",
   'See the plugin README, "Granting the tools to an agent".'
 ].join(" ");
 function isSecretRefBinding(value) {

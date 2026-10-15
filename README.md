@@ -241,6 +241,14 @@ hand.
 3. **Assign** it to the agents that should have Home Assistant access, and only
    those.
 
+**You write those rules once per instance, not once per agent.** A profile is a
+reusable object: it is bound to a target, and the same profile can carry as many
+bindings as you like — `agent`, `company`, `project`, `issue`, `routine` or
+`gateway`. So the second agent that needs Home Assistant is one binding, not
+nine rules again, and a `company` binding makes the set a default that every
+agent inherits. Prefer per-agent bindings if only some agents should be able to
+read the house.
+
 Three things about that screen are worth knowing before you use it:
 
 - **The tool-name field is matched literally, despite the label.** It is called
@@ -371,8 +379,26 @@ them locally.
 
 The unit tests are fixture-backed and the smoke test runs against a stub, so
 together they prove this plugin's behaviour — not any particular Home Assistant
-instance. **Nothing here has touched a real Home Assistant.** The first real
-exercise is configuring it and asking an agent to run `get_config`.
+instance.
+
+**All nine tools have now been called against a real Home Assistant**, through
+a real agent tool-gateway session on a self-hosted Paperclip at
+`2026.1012.0`, with the instance reached at a private LAN address. Every one
+returned a JSON object. `get_history` returned 11 state changes for a real
+light; `get_logbook` returned 6 entries; `list_services` returned the `light`
+domain's service map; `check_config` returned `valid`; `render_template`
+rendered. An unknown entity id came back as this plugin's own message, *Home
+Assistant has no such entity or endpoint.*, and not as a transport error — which
+is the whole point of returning `data` on the failure path.
+
+Two consequences worth recording, because both were open questions:
+
+- **The worker's `fetch` is not subject to the host's private-address block.**
+  That block lives in `ctx.http.fetch`, which this plugin deliberately does not
+  use. A private LAN address works.
+- **A plugin tool's result survives the round trip** once `data` is an object.
+  The host forwards it as `structuredContent` and the agent's MCP client accepts
+  it.
 
 The instance-config tests reproduce the host's save-time validator — Ajv with
 formats plus the host's permissive `secret-ref` format, assembled the same way
@@ -384,10 +410,13 @@ The deny-by-default behaviour in [Granting the tools to an
 agent](#granting-the-tools-to-an-agent) was observed, not inferred: on a
 running `2026.1012.0` instance with this plugin `ready` and its worker up, the
 assigned tool catalogue for an agent held 164 tools and none of them were
-plugin tools, and calls were refused as a default deny. **The remedy — the
-profile and its rules — has not been executed yet**, only read out of the
-policy engine and the profiles UI at that version. Expect the field labels to
-be the part that drifts.
+plugin tools, and calls were refused as a default deny.
+
+**The remedy has now been executed and works.** An instance admin created a
+profile with nine Allow / tool-name rules and bound it to one agent; that
+agent's catalogue went from 0 plugin tools to all 9, and every one of them then
+answered. So both halves of that section are observed, not inferred. Expect the
+field labels to be the part that drifts.
 
 It has now been installed on a running self-hosted Paperclip at `2026.1012.0`,
 and that install is where the dialog defect, the npm-name resolution and the
