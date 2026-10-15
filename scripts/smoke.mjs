@@ -30,6 +30,19 @@ const ha = createServer((req, res) => {
     res.writeHead(401).end("unauthorized");
     return;
   }
+  if (req.url?.startsWith("/api/history/period/")) {
+    // Home Assistant answers with one array per entity, so a single-entity
+    // request arrives as an array nested inside an array.
+    res.writeHead(200, { "content-type": "application/json" }).end(
+      JSON.stringify([
+        [
+          { entity_id: "light.kitchen", state: "off", last_changed: "2026-10-14T11:58:00Z" },
+          { state: "on", last_changed: "2026-10-14T12:00:00Z" },
+        ],
+      ]),
+    );
+    return;
+  }
   if (req.url === "/api/states") {
     res.writeHead(200, { "content-type": "application/json" }).end(
       JSON.stringify([
@@ -118,6 +131,21 @@ createInterface({ input: child.stderr }).on("line", (l) =>
   console.log("  [worker stderr]", l.slice(0, 200)),
 );
 
+/**
+ * The agent's MCP client validates `structuredContent` as a JSON object. The
+ * host builds that field as `result.data ?? null`, so an absent `data`, an
+ * array, or a scalar all fail validation and the whole result — text content
+ * included — is discarded before the agent reads it.
+ */
+const structuredContentIsForwardable = (value) =>
+  value !== null && typeof value === "object" && !Array.isArray(value);
+
+const smokeParamsFor = (name) => {
+  if (name === "get_state" || name === "get_history") return { entityId: "light.kitchen" };
+  if (name === "render_template") return { template: "{{ 1 }}" };
+  return {};
+};
+
 const fail = (msg) => {
   console.log(`\nFAIL: ${msg}`);
   child.kill();
@@ -181,8 +209,60 @@ try {
   if (!/no such entity or endpoint/.test(missing?.error ?? "")) {
     fail("a 404 should surface as a fixable tool error");
   }
+  // The message is only worth writing if it survives the transport. The host
+  // forwards `content` as the text block and `data` as `structuredContent`,
+  // and the agent's client discards a result whose `structuredContent` is not
+  // an object — so an error carrying neither field reaches nobody.
+  if (!/no such entity or endpoint/.test(missing?.content ?? "")) {
+    fail("the error message must also travel in `content`");
+  }
+  if (!structuredContentIsForwardable(missing?.data)) {
+    fail("the error path must set `data`, or the client rejects the whole result");
+  }
 
-  console.log("\nPASS: forked worker spoke the protocol, resolved its secret, and read a loopback Home Assistant stub.");
+  const history = await send("executeTool", {
+    toolName: "get_history",
+    parameters: { entityId: "light.kitchen" },
+    runContext: {
+      agentId: "agent-smoke",
+      runId: "run-smoke",
+      companyId: "company-smoke",
+      projectId: "project-smoke",
+    },
+  });
+
+  if (history?.error) fail(`get_history returned an error: ${history.error}`);
+  console.log(
+    `executeTool(get_history, light.kitchen) -> returned=${history?.data?.returned} first=${JSON.stringify(history?.data?.changes?.[0])}`,
+  );
+  if (!structuredContentIsForwardable(history?.data)) {
+    fail("get_history's result is not a valid structuredContent object");
+  }
+  if (history.data.returned !== 2) fail(`expected 2 history rows, got ${history.data?.returned}`);
+  if (history.data.entityId !== "light.kitchen") fail("get_history lost the entity it was asked about");
+
+  // Every tool, driven through the real worker, must clear the same bar.
+  for (const tool of manifest.tools ?? []) {
+    const call = await send("executeTool", {
+      toolName: tool.name,
+      parameters: smokeParamsFor(tool.name),
+      runContext: {
+        agentId: "agent-smoke",
+        runId: "run-smoke",
+        companyId: "company-smoke",
+        projectId: "project-smoke",
+      },
+    });
+    if (!structuredContentIsForwardable(call?.data)) {
+      fail(`${tool.name} produced structuredContent the agent's client rejects`);
+    }
+    if (typeof call?.content !== "string" || call.content.length === 0) {
+      fail(`${tool.name} produced no text content`);
+    }
+  }
+  console.log(`all ${manifest.tools?.length} tools returned a forwardable result`);
+
+  console.log("\nPASS: forked worker spoke the protocol, resolved its secret, read a loopback Home Assistant stub, and every result — success and failure — survived the host's MCP forwarding.");
 } catch (error) {
   fail(error.message);
 }

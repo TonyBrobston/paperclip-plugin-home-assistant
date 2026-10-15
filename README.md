@@ -222,6 +222,42 @@ the right answer and the policy screen means what it says.
 If you want governed device control, that belongs in a curated catalog
 connector, where the risk class is declared and reviewed and approvals execute.
 
+## Why every result is an object
+
+Every tool returns a JSON **object**, and three of them wrap an array to do it.
+That is a compatibility contract with the transport, not a formatting
+preference.
+
+The host forwards a tool result's `data` as MCP `structuredContent`, and an
+agent's MCP client validates that field as a record. The forwarding is
+unconditional — `structuredContent: result.data ?? null` — so three shapes fail
+validation and make the client discard the **entire** result, text content
+included, before the agent reads any of it:
+
+- a top-level array, which is what `/api/history/period`, `/api/logbook` and
+  `/api/services` hand back verbatim;
+- a scalar or `null`;
+- an absent `data`, which the host forwards as an explicit `null`.
+
+So `get_history` returns `{ entityId, start, end, minimalResponse, returned,
+changes }`, `get_logbook` returns `{ entityId, start, end, returned, entries }`,
+and `list_services` returns `{ domain, returned, domains }`. `get_history` also
+flattens Home Assistant's per-entity series, since the tool requires one entity
+and therefore gets at most one series.
+
+The same rule governs the failure path. A result carrying only `error` travels
+in neither forwarded field, so `toolError` sets `content` and `data` alongside
+it — otherwise this plugin's specific messages ("could not be reached at the
+configured address", "rejected the long-lived access token", "has no such
+entity or endpoint") are written but unreachable, and every distinct failure
+reads to the agent as one identical schema error. It also logs a warning, so a
+failure is visible on the plugin health page even when an agent's transport
+drops it.
+
+`worker.ts` keeps a `structured()` backstop at the one place the host reads, and
+both the unit suite and `scripts/smoke.mjs` carry a copy of the host's
+forwarding rule, so a future tool cannot reintroduce the fault quietly.
+
 ## A note on outbound HTTP
 
 The plugin uses the worker runtime's own `fetch` rather than the SDK's
@@ -246,7 +282,7 @@ underlying request text back to the agent.
 ```bash
 npm install
 npm run typecheck
-npm test          # 50 unit tests
+npm test          # 102 unit tests
 npm run build     # writes dist/worker.js and dist/manifest.js
 node scripts/smoke.mjs
 ```
@@ -255,7 +291,9 @@ node scripts/smoke.mjs
 the host does, plays the host side of the JSON-RPC protocol — answering the
 worker's `config.get` and `secrets.resolve` calls — and drives a real tool call
 against a stub Home Assistant on `127.0.0.1`. The loopback address is the point:
-it is exactly the case the host's gated fetch helper refuses.
+it is exactly the case the host's gated fetch helper refuses. It also drives
+every tool through the built worker and asserts each result would survive the
+host's MCP forwarding — see "Why every result is an object".
 
 Commit `dist/*.js` when you change `src/`, since installs read the built
 output. Sourcemaps are generated but not committed — they are mostly inlined

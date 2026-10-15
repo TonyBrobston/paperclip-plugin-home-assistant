@@ -42255,6 +42255,20 @@ function window(startTime, endTime) {
     end: endTime
   };
 }
+function expectArray(value, what) {
+  if (!Array.isArray(value)) {
+    throw new HomeAssistantError(`Home Assistant returned an unexpected ${what}.`);
+  }
+  return value;
+}
+function flattenHistory(value) {
+  const series = expectArray(value, "history response");
+  if (series.length === 0) return [];
+  if (series.every((entry) => Array.isArray(entry))) {
+    return series.flat();
+  }
+  return series;
+}
 async function executeTool(options, toolName, parameters) {
   const params = asRecord(parameters);
   const run = (path2, body) => call(options, path2, body);
@@ -42265,10 +42279,7 @@ async function executeTool(options, toolName, parameters) {
       const search = optionalString(params, "search", 128)?.toLowerCase();
       const limit = optionalInteger(params, "limit", 1, ENTITY_PAGE_MAX) ?? ENTITY_PAGE_MAX;
       if (domainFilter !== void 0) domain2(domainFilter, "domain");
-      const states = parseJson(await run("/api/states"));
-      if (!Array.isArray(states)) {
-        throw new HomeAssistantError("Home Assistant returned an unexpected state list.");
-      }
+      const states = expectArray(parseJson(await run("/api/states")), "state list");
       const matched = states.filter((state) => {
         const id = typeof state.entity_id === "string" ? state.entity_id : "";
         if (domainFilter && !id.startsWith(`${domainFilter}.`)) return false;
@@ -42292,13 +42303,18 @@ async function executeTool(options, toolName, parameters) {
       rejectUnknownKeys(params, ["domain"]);
       const domainFilter = optionalString(params, "domain", 64);
       if (domainFilter !== void 0) domain2(domainFilter, "domain");
-      const services = parseJson(await run("/api/services"));
-      if (!Array.isArray(services)) {
-        throw new HomeAssistantError("Home Assistant returned an unexpected service list.");
-      }
-      return domainFilter ? services.filter(
+      const services = expectArray(
+        parseJson(await run("/api/services")),
+        "service list"
+      );
+      const domains = domainFilter ? services.filter(
         (entry) => entry !== null && typeof entry === "object" && entry.domain === domainFilter
       ) : services;
+      return {
+        domain: domainFilter ?? null,
+        returned: domains.length,
+        domains
+      };
     }
     case TOOL_NAMES.renderTemplate: {
       rejectUnknownKeys(params, ["template"]);
@@ -42324,9 +42340,19 @@ async function executeTool(options, toolName, parameters) {
       const query = new URLSearchParams({ filter_entity_id: id });
       if (end) query.set("end_time", end);
       if (minimal) query.set("minimal_response", "");
-      return parseJson(
-        await run(`/api/history/period/${encodeURIComponent(start)}?${query.toString()}`)
+      const changes = flattenHistory(
+        parseJson(
+          await run(`/api/history/period/${encodeURIComponent(start)}?${query.toString()}`)
+        )
       );
+      return {
+        entityId: id,
+        start,
+        end: end ?? null,
+        minimalResponse: minimal,
+        returned: changes.length,
+        changes
+      };
     }
     case TOOL_NAMES.getLogbook: {
       rejectUnknownKeys(params, ["entityId", "startTime", "endTime"]);
@@ -42340,9 +42366,19 @@ async function executeTool(options, toolName, parameters) {
       if (id) query.set("entity", id);
       if (end) query.set("end_time", end);
       const suffix = query.toString();
-      return parseJson(
-        await run(`/api/logbook/${encodeURIComponent(start)}${suffix ? `?${suffix}` : ""}`)
+      const entries2 = expectArray(
+        parseJson(
+          await run(`/api/logbook/${encodeURIComponent(start)}${suffix ? `?${suffix}` : ""}`)
+        ),
+        "logbook response"
       );
+      return {
+        entityId: id ?? null,
+        start,
+        end: end ?? null,
+        returned: entries2.length,
+        entries: entries2
+      };
     }
     case TOOL_NAMES.getErrorLog: {
       rejectUnknownKeys(params, ["maxBytes"]);
@@ -42521,11 +42557,23 @@ async function resolveClientOptions(ctx, companyId) {
   }
   return { baseUrl, token };
 }
-function toolError(error62) {
-  if (error62 instanceof InvalidParameterError || error62 instanceof HomeAssistantError) {
-    return { error: error62.message };
+function structured(data) {
+  if (data !== null && typeof data === "object" && !Array.isArray(data)) {
+    return data;
   }
-  return { error: "The Home Assistant request failed." };
+  return { value: data };
+}
+function toolError(ctx, toolName, companyId, error62) {
+  const expected = error62 instanceof InvalidParameterError || error62 instanceof HomeAssistantError;
+  const message2 = expected ? error62.message : "The Home Assistant request failed.";
+  ctx.logger.warn("Home Assistant tool call failed", {
+    tool: toolName,
+    companyId,
+    // An unexpected error's own text is withheld from the agent; the log is
+    // operator-facing, so record its class to make one diagnosable.
+    reason: expected ? message2 : `unexpected ${error62?.name ?? "error"}`
+  });
+  return { error: message2, content: message2, data: { error: message2 } };
 }
 var plugin = definePlugin({
   async setup(ctx) {
@@ -42540,7 +42588,9 @@ var plugin = definePlugin({
         async (params, runCtx) => {
           try {
             const options = await resolveClientOptions(ctx, runCtx.companyId);
-            const data = await executeTool(options, declaration.name, params);
+            const data = structured(
+              await executeTool(options, declaration.name, params)
+            );
             return {
               // The agent reads `content`; `data` keeps the structured form
               // for anything that consumes the result programmatically.
@@ -42548,7 +42598,7 @@ var plugin = definePlugin({
               data
             };
           } catch (error62) {
-            return toolError(error62);
+            return toolError(ctx, declaration.name, runCtx.companyId, error62);
           }
         }
       );

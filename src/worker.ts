@@ -69,6 +69,24 @@ async function resolveClientOptions(
 }
 
 /**
+ * Guarantee the structured half of a tool result is a JSON object.
+ *
+ * The host forwards `ToolResult.data` as MCP `structuredContent`, and the
+ * client's schema requires an object there: an array, a scalar, or an absent
+ * `data` (which the host forwards as an explicit `null`) makes the client
+ * discard the whole result — `content` included — before the agent reads any of
+ * it. Every tool already returns an object, and the array-returning endpoints
+ * are wrapped in `home-assistant.ts`; this is the unconditional backstop at the
+ * one place the host reads, so a future tool cannot reintroduce the fault.
+ */
+function structured(data: unknown): Record<string, unknown> {
+  if (data !== null && typeof data === "object" && !Array.isArray(data)) {
+    return data as Record<string, unknown>;
+  }
+  return { value: data };
+}
+
+/**
  * Turn a thrown error into a tool result.
  *
  * Returning `{ error }` rather than throwing keeps the message useful to the
@@ -76,12 +94,32 @@ async function resolveClientOptions(
  * crash. Only messages this plugin wrote are passed through; anything else is
  * replaced, because an arbitrary runtime error can carry the instance address
  * or request detail in its text.
+ *
+ * `content` and `data` are set alongside `error` deliberately. `error` on its
+ * own travels in neither of the two fields the host forwards, so the agent's
+ * client rejected the result as malformed and the message — the whole point of
+ * writing specific ones — never arrived. The same call is logged, so a failure
+ * is visible on the plugin health page even when the agent's transport drops it.
  */
-function toolError(error: unknown): ToolResult {
-  if (error instanceof InvalidParameterError || error instanceof HomeAssistantError) {
-    return { error: error.message };
-  }
-  return { error: "The Home Assistant request failed." };
+function toolError(
+  ctx: PluginContext,
+  toolName: string,
+  companyId: string,
+  error: unknown,
+): ToolResult {
+  const expected =
+    error instanceof InvalidParameterError || error instanceof HomeAssistantError;
+  const message = expected
+    ? error.message
+    : "The Home Assistant request failed.";
+  ctx.logger.warn("Home Assistant tool call failed", {
+    tool: toolName,
+    companyId,
+    // An unexpected error's own text is withheld from the agent; the log is
+    // operator-facing, so record its class to make one diagnosable.
+    reason: expected ? message : `unexpected ${(error as Error)?.name ?? "error"}`,
+  });
+  return { error: message, content: message, data: { error: message } };
 }
 
 const plugin = definePlugin({
@@ -97,15 +135,17 @@ const plugin = definePlugin({
         async (params: unknown, runCtx: ToolRunContext): Promise<ToolResult> => {
           try {
             const options = await resolveClientOptions(ctx, runCtx.companyId);
-            const data = await executeTool(options, declaration.name, params);
+            const data = structured(
+              await executeTool(options, declaration.name, params),
+            );
             return {
               // The agent reads `content`; `data` keeps the structured form
               // for anything that consumes the result programmatically.
               content: JSON.stringify(data, null, 2),
-              data: data as Record<string, unknown>,
+              data,
             };
           } catch (error) {
-            return toolError(error);
+            return toolError(ctx, declaration.name, runCtx.companyId, error);
           }
         },
       );
