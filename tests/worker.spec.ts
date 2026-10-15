@@ -1,4 +1,5 @@
 import { createTestHarness } from "@paperclipai/plugin-sdk/testing";
+import type { ToolResult } from "@paperclipai/plugin-sdk";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import manifest from "../src/manifest.js";
 import plugin from "../src/worker.js";
@@ -215,5 +216,181 @@ describe("onValidateConfig", () => {
     const result = await plugin.definition.onValidateConfig!({});
     expect(result.ok).toBe(false);
     expect(result.errors).toHaveLength(2);
+  });
+});
+
+/**
+ * The host's forwarding rule, copied from `server/src/routes/tool-gateway.ts`
+ * (the `tools/call` branch of `/api/mcp/gateways/:gatewayPublicId`, which is
+ * the `paperclip-assigned` MCP server every heartbeat run mounts):
+ *
+ * ```ts
+ * const contentText = typeof resultRecord?.content === "string"
+ *   ? resultRecord.content
+ *   : JSON.stringify(resultRecord?.data ?? result.result ?? null);
+ * res.json({ result: {
+ *   content: [{ type: "text", text: contentText }],
+ *   structuredContent: resultRecord?.data ?? null,
+ *   isError: false,
+ * } });
+ * ```
+ *
+ * Note `?? null`: an absent `data` is forwarded as an explicit `null`, and the
+ * client's schema requires a record there. So a `ToolResult` carrying only
+ * `error` is discarded in full — `error` is not one of the two fields that
+ * travel. This copy exists so that regression fails here rather than silently
+ * shipping a tool whose every failure reads as a transport error.
+ */
+function forwardAsMcpResult(result: ToolResult) {
+  const contentText =
+    typeof result.content === "string"
+      ? result.content
+      : JSON.stringify(result.data ?? result ?? null);
+  return {
+    content: [{ type: "text", text: contentText }],
+    structuredContent: result.data ?? null,
+  };
+}
+
+/** The client-side schema check that rejected every call from this plugin. */
+function clientAcceptsStructuredContent(value: unknown): boolean {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+describe("results survive the host's MCP forwarding", () => {
+  it("a success carries structured data the client will accept", async () => {
+    const harness = await harnessWith(CONFIG);
+    stubFetch({ version: "2026.10.1" });
+    const result = await harness.executeTool(TOOL_NAMES.getConfig, {});
+    const forwarded = forwardAsMcpResult(result);
+    expect(clientAcceptsStructuredContent(forwarded.structuredContent)).toBe(true);
+  });
+
+  it("every tool's success is an object once Home Assistant answers", async () => {
+    const harness = await harnessWith(CONFIG);
+    for (const tool of TOOL_DECLARATIONS) {
+      // An array body exercises the three endpoints that return one; the rest
+      // ignore it or wrap it.
+      stubFetch([]);
+      const result = await harness.executeTool(tool.name, defaultParamsFor(tool.name));
+      const forwarded = forwardAsMcpResult(result);
+      expect(
+        clientAcceptsStructuredContent(forwarded.structuredContent),
+        `${tool.name} produced structuredContent the client rejects`,
+      ).toBe(true);
+    }
+  });
+
+  /**
+   * Each row is one of the distinct causes this plugin writes a specific
+   * message for. Before the fix all four reached the agent as the same schema
+   * error, which is why the live cause of a failing install could not be read
+   * from the agent side at all.
+   */
+  const failures: Array<[string, () => void | Promise<void>, RegExp]> = [
+    [
+      "an unreachable instance",
+      () => {
+        vi.stubGlobal("fetch", async () => {
+          throw new Error("connect ECONNREFUSED");
+        });
+      },
+      /could not be reached at the configured address/,
+    ],
+    [
+      "a rejected token",
+      () => {
+        stubFetch({ message: "401: Unauthorized" }, 401);
+      },
+      /rejected the long-lived access token/,
+    ],
+    [
+      "an unknown entity or endpoint",
+      () => {
+        stubFetch({}, 404);
+      },
+      /no such entity or endpoint/,
+    ],
+    [
+      "an unexpected status",
+      () => {
+        stubFetch({}, 500);
+      },
+      /request failed \(500\)/,
+    ],
+  ];
+
+  it.each(failures)("%s reaches the agent", async (_label, arrange, expected) => {
+    await arrange();
+    const harness = await harnessWith(CONFIG);
+    const result = await harness.executeTool(TOOL_NAMES.getConfig, {});
+
+    expect(result.error).toMatch(expected);
+    // The two fields that actually travel.
+    expect(result.content).toMatch(expected);
+    expect(clientAcceptsStructuredContent(result.data)).toBe(true);
+
+    const forwarded = forwardAsMcpResult(result);
+    expect(clientAcceptsStructuredContent(forwarded.structuredContent)).toBe(true);
+    expect(forwarded.content[0]!.text).toMatch(expected);
+  });
+
+  it("an unconfigured install says so instead of failing as a schema error", async () => {
+    const harness = await harnessWith({});
+    const result = await harness.executeTool(TOOL_NAMES.getConfig, {});
+    expect(result.content).toMatch(/no Home Assistant address configured/);
+    expect(clientAcceptsStructuredContent(forwardAsMcpResult(result).structuredContent)).toBe(
+      true,
+    );
+  });
+
+  it("a bad argument comes back as this plugin's own message", async () => {
+    const harness = await harnessWith(CONFIG);
+    stubFetch({});
+    const result = await harness.executeTool(TOOL_NAMES.getState, {
+      entityId: "not-an-entity-id",
+    });
+    expect(result.content).toMatch(/entity ID/);
+    expect(clientAcceptsStructuredContent(forwardAsMcpResult(result).structuredContent)).toBe(
+      true,
+    );
+  });
+});
+
+describe("failures are visible to the operator too", () => {
+  it("logs a warning naming the tool and the reason", async () => {
+    const harness = await harnessWith(CONFIG);
+    stubFetch({}, 401);
+    await harness.executeTool(TOOL_NAMES.getConfig, {});
+
+    const warning = harness.logs.find((entry) => entry.level === "warn");
+    expect(warning, "no warning reached the plugin log").toBeDefined();
+    expect(warning!.meta?.tool).toBe(TOOL_NAMES.getConfig);
+    expect(String(warning!.meta?.reason)).toMatch(/rejected the long-lived access token/);
+  });
+
+  it("logs an unexpected error without putting its text in the log's reason", async () => {
+    const harness = await harnessWith(CONFIG);
+    // A body that fails mid-stream throws past the request wrapper, so this is
+    // the branch whose message the agent must not see.
+    vi.stubGlobal(
+      "fetch",
+      async () =>
+        new Response(
+          new ReadableStream({
+            start(controller) {
+              controller.error(new TypeError("secret-bearing internal detail"));
+            },
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        ),
+    );
+    const result = await harness.executeTool(TOOL_NAMES.getConfig, {});
+    expect(result.error).toBe("The Home Assistant request failed.");
+
+    const warning = harness.logs.find((entry) => entry.level === "warn");
+    expect(warning).toBeDefined();
+    expect(String(warning!.meta?.reason)).toBe("unexpected TypeError");
+    expect(JSON.stringify(warning)).not.toMatch(/secret-bearing/);
   });
 });

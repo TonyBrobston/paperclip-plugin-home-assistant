@@ -194,6 +194,41 @@ function window(startTime?: string, endTime?: string) {
   };
 }
 
+/**
+ * Require a JSON array from an endpoint documented to return one.
+ *
+ * Every array Home Assistant returns is wrapped in an object before it leaves
+ * this module, because the host forwards a tool's structured result as MCP
+ * `structuredContent` and that field must be a JSON *object*. A top-level
+ * array is rejected by the client's schema before the agent sees any of it, so
+ * a tool that returns one is unusable even when Home Assistant answered
+ * perfectly. See README "Why every result is an object".
+ */
+function expectArray(value: unknown, what: string): unknown[] {
+  if (!Array.isArray(value)) {
+    throw new HomeAssistantError(`Home Assistant returned an unexpected ${what}.`);
+  }
+  return value;
+}
+
+/**
+ * Flatten `/api/history/period`'s per-entity series into one list of rows.
+ *
+ * Home Assistant answers with an array of series, one per entity. `get_history`
+ * requires an entity ID and sends `filter_entity_id`, so there is at most one
+ * series; flattening keeps the nesting out of the agent's way. Anything that is
+ * not an array of arrays is passed through as a single series rather than
+ * discarded, so an unexpected shape still reaches the agent.
+ */
+function flattenHistory(value: unknown): unknown[] {
+  const series = expectArray(value, "history response");
+  if (series.length === 0) return [];
+  if (series.every((entry) => Array.isArray(entry))) {
+    return series.flat() as unknown[];
+  }
+  return series;
+}
+
 /** The documented liveness endpoint. It requires the token, so a success proves both reachability and a valid credential without reading household data. */
 export async function probe(options: ClientOptions): Promise<void> {
   await call(options, "/api/");
@@ -215,10 +250,7 @@ export async function executeTool(
       const limit = optionalInteger(params, "limit", 1, ENTITY_PAGE_MAX) ?? ENTITY_PAGE_MAX;
       if (domainFilter !== undefined) domain(domainFilter, "domain");
 
-      const states = parseJson(await run("/api/states"));
-      if (!Array.isArray(states)) {
-        throw new HomeAssistantError("Home Assistant returned an unexpected state list.");
-      }
+      const states = expectArray(parseJson(await run("/api/states")), "state list");
       const matched = (states as HomeAssistantState[]).filter((state) => {
         const id = typeof state.entity_id === "string" ? state.entity_id : "";
         if (domainFilter && !id.startsWith(`${domainFilter}.`)) return false;
@@ -247,11 +279,11 @@ export async function executeTool(
       rejectUnknownKeys(params, ["domain"]);
       const domainFilter = optionalString(params, "domain", 64);
       if (domainFilter !== undefined) domain(domainFilter, "domain");
-      const services = parseJson(await run("/api/services"));
-      if (!Array.isArray(services)) {
-        throw new HomeAssistantError("Home Assistant returned an unexpected service list.");
-      }
-      return domainFilter
+      const services = expectArray(
+        parseJson(await run("/api/services")),
+        "service list",
+      );
+      const domains = domainFilter
         ? services.filter(
             (entry) =>
               entry !== null &&
@@ -259,6 +291,11 @@ export async function executeTool(
               (entry as { domain?: unknown }).domain === domainFilter,
           )
         : services;
+      return {
+        domain: domainFilter ?? null,
+        returned: domains.length,
+        domains,
+      };
     }
 
     case TOOL_NAMES.renderTemplate: {
@@ -290,9 +327,19 @@ export async function executeTool(
       if (end) query.set("end_time", end);
       // Home Assistant treats the bare presence of this key as the flag.
       if (minimal) query.set("minimal_response", "");
-      return parseJson(
-        await run(`/api/history/period/${encodeURIComponent(start)}?${query.toString()}`),
+      const changes = flattenHistory(
+        parseJson(
+          await run(`/api/history/period/${encodeURIComponent(start)}?${query.toString()}`),
+        ),
       );
+      return {
+        entityId: id,
+        start,
+        end: end ?? null,
+        minimalResponse: minimal,
+        returned: changes.length,
+        changes,
+      };
     }
 
     case TOOL_NAMES.getLogbook: {
@@ -307,9 +354,19 @@ export async function executeTool(
       if (id) query.set("entity", id);
       if (end) query.set("end_time", end);
       const suffix = query.toString();
-      return parseJson(
-        await run(`/api/logbook/${encodeURIComponent(start)}${suffix ? `?${suffix}` : ""}`),
+      const entries = expectArray(
+        parseJson(
+          await run(`/api/logbook/${encodeURIComponent(start)}${suffix ? `?${suffix}` : ""}`),
+        ),
+        "logbook response",
       );
+      return {
+        entityId: id ?? null,
+        start,
+        end: end ?? null,
+        returned: entries.length,
+        entries,
+      };
     }
 
     case TOOL_NAMES.getErrorLog: {

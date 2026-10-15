@@ -214,9 +214,11 @@ describe("read endpoints", () => {
     ]);
     const result = (await executeTool(options, TOOL_NAMES.listServices, {
       domain: "light",
-    })) as Array<{ domain: string }>;
-    expect(result).toHaveLength(1);
-    expect(result[0]!.domain).toBe("light");
+    })) as { domain: string; returned: number; domains: Array<{ domain: string }> };
+    expect(result.domain).toBe("light");
+    expect(result.returned).toBe(1);
+    expect(result.domains).toHaveLength(1);
+    expect(result.domains[0]!.domain).toBe("light");
   });
 
   it("render_template posts the template and returns plaintext output", async () => {
@@ -321,5 +323,117 @@ describe("reachable surface", () => {
       await executeTool(options, tool, params);
       expect(calls[0]!.init.method, `${tool} must be a GET`).toBe("GET");
     }
+  });
+});
+
+/**
+ * The host forwards a tool's structured result as MCP `structuredContent`, and
+ * the agent's client validates that field as a JSON object. A top-level array
+ * — which is what `/api/history/period`, `/api/logbook` and `/api/services`
+ * hand back — fails that schema, and the client discards the entire result
+ * before the agent reads any of it. So the shape of every tool's result is a
+ * compatibility contract with the transport, not a formatting preference.
+ */
+describe("structured results are valid MCP structuredContent", () => {
+  const haState = state("light.kitchen", "on", "Kitchen");
+
+  /** What Home Assistant actually returns on each documented endpoint. */
+  const responses: Array<[string, Record<string, unknown>, unknown, string?]> = [
+    [TOOL_NAMES.listEntities, {}, [haState]],
+    [TOOL_NAMES.getState, { entityId: "light.kitchen" }, haState],
+    [
+      TOOL_NAMES.listServices,
+      {},
+      [{ domain: "light", services: { turn_on: { fields: {} } } }],
+    ],
+    [TOOL_NAMES.renderTemplate, { template: "{{ 1 }}" }, "1", "text/plain"],
+    [TOOL_NAMES.getConfig, {}, { version: "2026.10.1", location_name: "Home" }],
+    [TOOL_NAMES.checkConfig, {}, { result: "valid", errors: null }],
+    [
+      TOOL_NAMES.getHistory,
+      { entityId: "light.kitchen" },
+      [[haState, { ...haState, state: "off" }]],
+    ],
+    [
+      TOOL_NAMES.getLogbook,
+      {},
+      [{ when: "2026-10-14T00:00:00Z", name: "Kitchen", message: "turned on" }],
+    ],
+    [TOOL_NAMES.getErrorLog, {}, "ERROR boom\n", "text/plain"],
+  ];
+
+  it("covers every tool in the catalog", () => {
+    expect(responses.map(([name]) => name).sort()).toEqual(
+      Object.values(TOOL_NAMES).sort(),
+    );
+  });
+
+  it.each(responses)(
+    "%s returns an object, not an array or a scalar",
+    async (tool, params, body, contentType) => {
+      const { options } = recorder([body], contentType ? { contentType } : undefined);
+      const result = await executeTool(options, tool, params);
+      expect(Array.isArray(result), `${tool} returned a top-level array`).toBe(false);
+      expect(result === null, `${tool} returned null`).toBe(false);
+      expect(typeof result, `${tool} returned a scalar`).toBe("object");
+    },
+  );
+});
+
+describe("window-shaped results carry their request back", () => {
+  it("get_history flattens the per-entity series and names the window", async () => {
+    const rows = [state("light.kitchen", "on"), state("light.kitchen", "off")];
+    const { options } = recorder([[rows]]);
+    const result = (await executeTool(options, TOOL_NAMES.getHistory, {
+      entityId: "light.kitchen",
+      startTime: "2026-10-14T00:00:00.000Z",
+      endTime: "2026-10-14T06:00:00.000Z",
+    })) as Record<string, unknown>;
+
+    expect(result.entityId).toBe("light.kitchen");
+    expect(result.start).toBe("2026-10-14T00:00:00.000Z");
+    expect(result.end).toBe("2026-10-14T06:00:00.000Z");
+    expect(result.minimalResponse).toBe(true);
+    expect(result.returned).toBe(2);
+    expect(result.changes).toEqual(rows);
+  });
+
+  it("get_history reports an empty window as zero rows rather than failing", async () => {
+    const { options } = recorder([[]]);
+    const result = (await executeTool(options, TOOL_NAMES.getHistory, {
+      entityId: "light.kitchen",
+    })) as Record<string, unknown>;
+    expect(result.returned).toBe(0);
+    expect(result.changes).toEqual([]);
+  });
+
+  it("get_history passes an unexpected flat array through instead of dropping it", async () => {
+    // Defensive: if Home Assistant ever answers with rows rather than series,
+    // the agent should still see the rows.
+    const { options } = recorder([[{ state: "on" }]]);
+    const result = (await executeTool(options, TOOL_NAMES.getHistory, {
+      entityId: "light.kitchen",
+    })) as Record<string, unknown>;
+    expect(result.changes).toEqual([{ state: "on" }]);
+  });
+
+  it("get_logbook names the window and reports no entity filter as null", async () => {
+    const entries = [{ when: "2026-10-14T00:00:00Z", message: "turned on" }];
+    const { options } = recorder([entries]);
+    const result = (await executeTool(options, TOOL_NAMES.getLogbook, {})) as Record<
+      string,
+      unknown
+    >;
+    expect(result.entityId).toBeNull();
+    expect(result.end).toBeNull();
+    expect(result.returned).toBe(1);
+    expect(result.entries).toEqual(entries);
+  });
+
+  it("refuses a non-array where the endpoint documents one", async () => {
+    const { options } = recorder([{ unexpected: true }]);
+    await expect(
+      executeTool(options, TOOL_NAMES.getLogbook, {}),
+    ).rejects.toThrow(/unexpected logbook response/);
   });
 });
