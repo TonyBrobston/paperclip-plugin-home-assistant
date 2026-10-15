@@ -207,8 +207,12 @@ var manifest = {
         description: "Create one in Home Assistant under your profile, at the bottom of the Security tab, then save it as a Paperclip secret and pick it here. A token pasted as raw text is refused rather than stored in this config.",
         properties: {
           type: { const: "secret_ref" },
-          secretId: { type: "string", minLength: 1 },
-          version: { type: "string" }
+          secretId: { type: "string", minLength: 1 }
+          // `version` is deliberately unconstrained. The host's own binding
+          // parser accepts "latest" or a positive integer, so a pinned version
+          // arrives as a number — and over-constraining this field is the
+          // mistake that made the save impossible in the first place. The host
+          // parses and rejects a bad binding after this schema runs.
         },
         required: ["type", "secretId"]
       }

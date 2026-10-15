@@ -71,7 +71,11 @@ const manifest: PaperclipPluginManifestV1 = {
         properties: {
           type: { const: "secret_ref" },
           secretId: { type: "string", minLength: 1 },
-          version: { type: "string" },
+          // `version` is deliberately unconstrained. The host's own binding
+          // parser accepts "latest" or a positive integer, so a pinned version
+          // arrives as a number — and over-constraining this field is the
+          // mistake that made the save impossible in the first place. The host
+          // parses and rejects a bad binding after this schema runs.
         },
         required: ["type", "secretId"],
       },

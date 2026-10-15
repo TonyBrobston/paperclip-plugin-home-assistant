@@ -113,6 +113,14 @@ describe("instance config schema", () => {
     });
 
     /**
+     * The host's `parseSecretRefBindingObject` accepts "latest" or a positive
+     * integer, so a pinned secret version reaches this schema as a number.
+     */
+    it("accepts a binding pinned to a numbered version", () => {
+      expect(withToken({ type: "secret_ref", secretId: TOKEN_REF.secretId, version: 3 })).toBe(true);
+    });
+
+    /**
      * The picker also allows typing a value straight into the field. Saving
      * that would persist the token as plaintext in plugin config — and the
      * worker requires a binding, so every tool call would fail afterwards
