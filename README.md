@@ -128,18 +128,60 @@ host generates that form from the manifest's `instanceConfigSchema`:
 
 - **Home Assistant address** — what you open Home Assistant at, scheme and port
   included and nothing else, e.g. `http://homeassistant.local:8123`. No path,
-  query string or credentials. `http` is accepted because the ordinary
-  deployment is a local address with no certificate.
+  query string or credentials; a trailing slash is accepted and stripped.
+  `http` is accepted because the ordinary deployment is a local address with no
+  certificate. See [Which address to use](#which-address-to-use).
 - **Long-lived access token** — create one in Home Assistant under your profile,
-  at the bottom of the Security tab. The field is a secret picker, so the token
-  is stored as a Paperclip secret reference and resolved at call time. It is
-  never written into plugin config as text.
+  at the bottom of the Security tab, save it as a Paperclip secret, and pick it
+  from the dropdown. The token is stored as a secret reference and resolved at
+  call time; it is never written into plugin config as text. The field also lets
+  you type a value directly — the schema refuses that, because saving it would
+  persist the token as plaintext, and the worker requires a reference anyway.
 
 **A long-lived access token inherits every permission of the account that
 issued it.** Home Assistant cannot scope one to specific entities, domains, or
 to read-only. This plugin is read-only because of what it does and does not
 implement, not because the token is restricted — so issue the token from an
 account with only the access you are willing to expose.
+
+### Which address to use
+
+If Home Assistant is reachable at more than one address, the choice is not
+cosmetic.
+
+**Do not use a hostname published through an identity-aware proxy** —
+Cloudflare Access, Authelia, an OIDC-authenticating reverse proxy. The proxy
+authenticates the *browser*, through a session cookie it sets after an
+interactive login. It does not know what a Home Assistant bearer token is. An
+API request arriving with one is answered by the proxy with a redirect to its
+own login page, so the request never reaches Home Assistant, and every tool
+fails in a way that looks like a rejected token. Two ways to tell before you
+commit to an address: a `GET <address>/api/` that returns a `30x` to a login
+host, or a `www-authenticate` header naming the proxy. Home Assistant answering
+for itself returns `401` with the body `401: Unauthorized`.
+
+Making such a hostname work would need either credentials the proxy understands
+(Cloudflare Access service tokens, for instance, which this plugin does not
+send) or a bypass rule on `/api/*` — and a bypass puts the Home Assistant API
+on the public internet behind nothing but the long-lived token. Prefer an
+address that does not leave the host.
+
+**Prefer the most local address that works**, in this order: a container alias
+or service name if Paperclip and Home Assistant share a Docker network; the
+host's own address if they do not. A Home Assistant container running with
+`network_mode: host` is not in any user-defined network's DNS, so its compose
+service name will not resolve from another container — that one is not a
+misconfiguration you can fix with a port.
+
+**`http` to a host-local address is the normal case, not a compromise.** Home
+Assistant serves plain HTTP on `8123` unless you give it `ssl_certificate`, so
+on most deployments there is no HTTPS port to point at; the TLS such a setup
+has belongs to the proxy and is terminated at the edge. When the address
+resolves to the machine Paperclip is running on, the token crosses one hop
+inside that machine rather than the network. If the two are on *different*
+machines, that stops being true — put TLS in front of Home Assistant, or accept
+that a long-lived token with full account permissions is crossing your LAN in
+cleartext.
 
 ### Verifying the configuration
 
@@ -226,6 +268,12 @@ The unit tests are fixture-backed and the smoke test runs against a stub, so
 together they prove this plugin's behaviour — not any particular Home Assistant
 instance. **Nothing here has touched a real Home Assistant.** The first real
 exercise is configuring it and asking an agent to run `get_config`.
+
+The instance-config tests reproduce the host's save-time validator — Ajv with
+formats plus the host's permissive `secret-ref` format, assembled the same way
+`plugin-config-validator.ts` assembles it — so the set of values the settings
+form will accept is asserted rather than assumed. That is a faithful copy of
+the validator, not a live save against a running instance.
 
 It has now been installed on a running self-hosted Paperclip at `2026.1012.0`,
 and that install is where the dialog defect, the npm-name resolution and the

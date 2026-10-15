@@ -35,17 +35,45 @@ const manifest: PaperclipPluginManifestV1 = {
         type: "string",
         title: "Home Assistant address",
         description:
-          "The address you open Home Assistant at, including the scheme and port and nothing else — for example http://homeassistant.local:8123. No path, query string or credentials.",
+          "The address you open Home Assistant at, including the scheme and port and nothing else — for example http://homeassistant.local:8123. A trailing slash is fine. No path, query string or credentials.",
         // http is accepted because the ordinary deployment is a local address
         // with no certificate.
-        pattern: "^https?://[^\\s/?#]+$",
+        //
+        // The trailing slash is accepted because a browser address bar shows
+        // one and this field is filled by pasting: the host validates this
+        // pattern with Ajv and rejects the whole save with a message naming
+        // only the schema, so an unaccepted slash reads as a broken plugin
+        // rather than as one stray character. `homeAssistantApiUrl` strips it
+        // before building a request, so there is nothing for the pattern to
+        // protect here.
+        //
+        // `@` is excluded so the pattern refuses the credentials its own
+        // description refuses. `homeAssistantApiUrl` throws on them too, but
+        // only once a tool is called — by which point the save looked fine.
+        pattern: "^https?://[^\\s/?#@]+/*$",
       },
       [CONFIG_KEYS.token]: {
-        type: "string",
+        // `format: "secret-ref"` is what makes the settings form render a
+        // secret picker, and the picker writes a binding *object* — not a
+        // string. The host validates this schema with Ajv before it looks for
+        // secret bindings, so declaring `type: "string"` here rejected the only
+        // value the form can produce, with "/token must be string". The field
+        // has to be typed as the object it receives.
+        //
+        // Ajv's strict mode logs that `format` expects a string or number type;
+        // it is a log, not an error, and the keyword is a host-side UI hint
+        // that never validates a value.
+        type: "object",
+        format: "secret-ref",
         title: "Long-lived access token",
         description:
-          "Create one in Home Assistant under your profile, at the bottom of the Security tab. Stored as a Paperclip secret reference, not as text in this config.",
-        format: "secret-ref",
+          "Create one in Home Assistant under your profile, at the bottom of the Security tab, then save it as a Paperclip secret and pick it here. A token pasted as raw text is refused rather than stored in this config.",
+        properties: {
+          type: { const: "secret_ref" },
+          secretId: { type: "string", minLength: 1 },
+          version: { type: "string" },
+        },
+        required: ["type", "secretId"],
       },
     },
     required: [CONFIG_KEYS.baseUrl, CONFIG_KEYS.token],
