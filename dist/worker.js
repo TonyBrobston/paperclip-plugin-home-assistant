@@ -42056,6 +42056,7 @@ var NAMESPACED_TOOL_NAMES = Object.values(
   TOOL_NAMES
 ).map((name) => `${PLUGIN_ID}:${name}`);
 var ENTITY_PAGE_MAX = 500;
+var EVENT_PAGE_MAX = 500;
 var LOG_TAIL_MAX_BYTES = 64 * 1024;
 var RESPONSE_LIMIT_BYTES = 8 * 1024 * 1024;
 var REQUEST_TIMEOUT_MS = 25e3;
@@ -42273,6 +42274,18 @@ function flattenHistory(value) {
   }
   return series;
 }
+function mostRecent(rows, limit) {
+  return rows.length <= limit ? [...rows] : rows.slice(rows.length - limit);
+}
+function serviceNames(entry) {
+  if (entry === null || typeof entry !== "object") return entry;
+  const record2 = entry;
+  const services = record2.services;
+  return {
+    domain: record2.domain ?? null,
+    services: services !== null && typeof services === "object" ? Object.keys(services) : []
+  };
+}
 async function executeTool(options, toolName, parameters) {
   const params = asRecord(parameters);
   const run = (path2, body) => call(options, path2, body);
@@ -42311,13 +42324,15 @@ async function executeTool(options, toolName, parameters) {
         parseJson(await run("/api/services")),
         "service list"
       );
-      const domains = domainFilter ? services.filter(
+      const matched = domainFilter ? services.filter(
         (entry) => entry !== null && typeof entry === "object" && entry.domain === domainFilter
       ) : services;
+      const detail = domainFilter ? "full" : "names";
       return {
         domain: domainFilter ?? null,
-        returned: domains.length,
-        domains
+        detail,
+        returned: matched.length,
+        domains: detail === "full" ? matched : matched.map(serviceNames)
       };
     }
     case TOOL_NAMES.renderTemplate: {
@@ -42334,13 +42349,20 @@ async function executeTool(options, toolName, parameters) {
       return parseJson(await run("/api/config/core/check_config", {}));
     }
     case TOOL_NAMES.getHistory: {
-      rejectUnknownKeys(params, ["entityId", "startTime", "endTime", "minimalResponse"]);
+      rejectUnknownKeys(params, [
+        "entityId",
+        "startTime",
+        "endTime",
+        "limit",
+        "minimalResponse"
+      ]);
       const id = entityId(requiredString(params, "entityId", 255), "entityId");
       const { start, end } = window(
         optionalTimestamp(params, "startTime"),
         optionalTimestamp(params, "endTime")
       );
       const minimal = optionalBoolean(params, "minimalResponse") ?? true;
+      const limit = optionalInteger(params, "limit", 1, EVENT_PAGE_MAX) ?? EVENT_PAGE_MAX;
       const query = new URLSearchParams({ filter_entity_id: id });
       if (end) query.set("end_time", end);
       if (minimal) query.set("minimal_response", "");
@@ -42349,23 +42371,27 @@ async function executeTool(options, toolName, parameters) {
           await run(`/api/history/period/${encodeURIComponent(start)}?${query.toString()}`)
         )
       );
+      const page2 = mostRecent(changes, limit);
       return {
         entityId: id,
         start,
         end: end ?? null,
         minimalResponse: minimal,
-        returned: changes.length,
-        changes
+        totalMatched: changes.length,
+        returned: page2.length,
+        truncated: changes.length > page2.length,
+        changes: page2
       };
     }
     case TOOL_NAMES.getLogbook: {
-      rejectUnknownKeys(params, ["entityId", "startTime", "endTime"]);
+      rejectUnknownKeys(params, ["entityId", "startTime", "endTime", "limit"]);
       const rawId = optionalString(params, "entityId", 255);
       const id = rawId === void 0 ? void 0 : entityId(rawId, "entityId");
       const { start, end } = window(
         optionalTimestamp(params, "startTime"),
         optionalTimestamp(params, "endTime")
       );
+      const limit = optionalInteger(params, "limit", 1, EVENT_PAGE_MAX) ?? EVENT_PAGE_MAX;
       const query = new URLSearchParams();
       if (id) query.set("entity", id);
       if (end) query.set("end_time", end);
@@ -42376,12 +42402,15 @@ async function executeTool(options, toolName, parameters) {
         ),
         "logbook response"
       );
+      const page2 = mostRecent(entries2, limit);
       return {
         entityId: id ?? null,
         start,
         end: end ?? null,
-        returned: entries2.length,
-        entries: entries2
+        totalMatched: entries2.length,
+        returned: page2.length,
+        truncated: entries2.length > page2.length,
+        entries: page2
       };
     }
     case TOOL_NAMES.getErrorLog: {
@@ -42412,6 +42441,12 @@ var startTimeProperty = {
 var endTimeProperty = {
   type: "string",
   description: "ISO 8601 end of the window. Defaults to now."
+};
+var eventLimitProperty = {
+  type: "integer",
+  minimum: 1,
+  maximum: EVENT_PAGE_MAX,
+  description: `Maximum rows to return, newest kept (default ${EVENT_PAGE_MAX}).`
 };
 function object2(properties, required2 = []) {
   return {
@@ -42454,7 +42489,7 @@ var TOOL_DECLARATIONS = [
   {
     name: TOOL_NAMES.listServices,
     displayName: "Home Assistant: list services",
-    description: "List the services Home Assistant exposes and the fields each one accepts, optionally filtered by domain. Use this to confirm a service name and its parameters before writing an automation that calls it.",
+    description: "List the services Home Assistant exposes, optionally filtered by domain. Use this to confirm a service name and its parameters before writing an automation that calls it. Without a domain it returns service names only; pass a domain to get that domain's full field schemas, which are too large to return for every domain at once.",
     parametersSchema: object2({
       domain: {
         type: "string",
@@ -42499,6 +42534,7 @@ var TOOL_DECLARATIONS = [
         entityId: entityIdProperty,
         startTime: startTimeProperty,
         endTime: endTimeProperty,
+        limit: eventLimitProperty,
         minimalResponse: {
           type: "boolean",
           description: "Return state changes without full attributes (default true, and much smaller)."
@@ -42510,11 +42546,12 @@ var TOOL_DECLARATIONS = [
   {
     name: TOOL_NAMES.getLogbook,
     displayName: "Home Assistant: get logbook",
-    description: "Get human-readable logbook entries over a time window, optionally for one entity \u2014 what happened and what triggered it.",
+    description: "Get human-readable logbook entries over a time window, optionally for one entity \u2014 what happened and what triggered it. Filter by entity where you can: a whole-installation logbook runs to thousands of entries, and only the newest page is returned.",
     parametersSchema: object2({
       entityId: entityIdProperty,
       startTime: startTimeProperty,
-      endTime: endTimeProperty
+      endTime: endTimeProperty,
+      limit: eventLimitProperty
     })
   },
   {
