@@ -17,6 +17,11 @@ import {
   TOOL_NAMES,
 } from "./constants.js";
 import {
+  redactCredentials,
+  redactDeep,
+  REDACTION_MARKER,
+} from "./redact.js";
+import {
   asRecord,
   domain,
   entityId,
@@ -349,7 +354,15 @@ export async function executeTool(
 
     case TOOL_NAMES.checkConfig: {
       rejectUnknownKeys(params, []);
-      return parseJson(await run("/api/config/core/check_config", {}));
+      // Home Assistant validates the configuration *after* `!secret`
+      // substitution, so the offending value voluptuous quotes back is the
+      // expanded secret rather than the `!secret` reference in the YAML. The
+      // whole parsed result is walked, not just the field errors live in
+      // today, because that field has moved between releases.
+      return redactDeep(
+        parseJson(await run("/api/config/core/check_config", {})),
+        options.token,
+      );
     }
 
     case TOOL_NAMES.getHistory: {
@@ -424,11 +437,22 @@ export async function executeTool(
       rejectUnknownKeys(params, ["maxBytes"]);
       const maxBytes =
         optionalInteger(params, "maxBytes", 1024, LOG_TAIL_MAX_BYTES) ?? LOG_TAIL_MAX_BYTES;
-      const log = Buffer.from(await run("/api/error_log"), "utf8");
+      // Scrubbed before the tail is cut, not after: slicing first would hand a
+      // pattern half a credential to match, and half a token is no longer
+      // recognisable as one. Truncation is therefore measured on the scrubbed
+      // text, which is what this call returns.
+      const log = Buffer.from(
+        redactCredentials(await run("/api/error_log"), options.token),
+        "utf8",
+      );
+      // The tail is the useful end of a log file.
+      const tail = log.subarray(Math.max(0, log.byteLength - maxBytes)).toString("utf8");
       return {
         truncated: log.byteLength > maxBytes,
-        // The tail is the useful end of a log file.
-        log: log.subarray(Math.max(0, log.byteLength - maxBytes)).toString("utf8"),
+        // True when the text below still carries a marker, so an agent reading
+        // an odd-looking log knows the oddity is this plugin's doing.
+        redacted: tail.includes(REDACTION_MARKER),
+        log: tail,
       };
     }
 

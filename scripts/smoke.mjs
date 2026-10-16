@@ -62,6 +62,30 @@ const ha = createServer((req, res) => {
     );
     return;
   }
+  // The two endpoints that return provider-composed text, answered the way a
+  // real instance does when credentials are in play: an integration logging the
+  // URL it failed on, a retry logging its own authorization header, and a
+  // validation error quoting a value Home Assistant expanded from `!secret`.
+  if (req.url === "/api/error_log") {
+    res.writeHead(200, { "content-type": "text/plain" }).end(
+      [
+        "2026-10-16 01:02:03 ERROR (MainThread) [homeassistant.components.rest] Fetch failed: https://api.example.com/v1?api_key=A1b2C3d4E5f6G7h8 returned 401",
+        `2026-10-16 01:02:04 ERROR (MainThread) [custom.integration] Retrying with Authorization: Bearer ${TOKEN}`,
+        "",
+      ].join("\n"),
+    );
+    return;
+  }
+  if (req.url === "/api/config/core/check_config") {
+    res.writeHead(200, { "content-type": "application/json" }).end(
+      JSON.stringify({
+        result: "invalid",
+        errors:
+          "Invalid config for [notify.smtp]: not a valid value for dictionary value @ data['password']. Got 'hunter2-correct-horse'",
+      }),
+    );
+    return;
+  }
   res.writeHead(404).end("not found");
 });
 
@@ -240,6 +264,39 @@ try {
   }
   if (history.data.returned !== 2) fail(`expected 2 history rows, got ${history.data?.returned}`);
   if (history.data.entityId !== "light.kitchen") fail("get_history lost the entity it was asked about");
+
+  /**
+   * The scrub, measured where it matters: on what leaves the worker process.
+   *
+   * The unit suite calls `redactCredentials` directly. This drives the two
+   * text-returning tools through the built worker, with the token the worker
+   * resolved for itself, and checks the whole forwarded result — `content` and
+   * `data` both, since the agent reads one and its client reads the other.
+   */
+  for (const [tool, secrets] of [
+    ["get_error_log", [TOKEN, "A1b2C3d4E5f6G7h8"]],
+    ["check_config", ["hunter2-correct-horse"]],
+  ]) {
+    const call = await send("executeTool", {
+      toolName: tool,
+      parameters: {},
+      runContext: {
+        agentId: "agent-smoke",
+        runId: "run-smoke",
+        companyId: "company-smoke",
+        projectId: "project-smoke",
+      },
+    });
+    if (call?.error) fail(`${tool} returned an error: ${call.error}`);
+    const forwarded = JSON.stringify(call);
+    for (const secret of secrets) {
+      if (forwarded.includes(secret)) fail(`${tool} forwarded a credential to the agent`);
+    }
+    if (!forwarded.includes("[redacted-credential]")) {
+      fail(`${tool} removed a credential without marking it`);
+    }
+    console.log(`executeTool(${tool}) -> credentials scrubbed, marker present`);
+  }
 
   // Every tool, driven through the real worker, must clear the same bar.
   for (const tool of manifest.tools ?? []) {

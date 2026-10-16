@@ -12,6 +12,7 @@ import {
   TOOL_NAMES,
 } from "../src/constants.js";
 import { InvalidParameterError } from "../src/validate.js";
+import { REDACTION_MARKER } from "../src/redact.js";
 
 const BASE_URL = "http://home-assistant.test:8123";
 const TOKEN = "test-token";
@@ -294,7 +295,7 @@ describe("read endpoints", () => {
       truncated: boolean;
       log: string;
     };
-    expect(result).toEqual({ truncated: false, log: "short" });
+    expect(result).toEqual({ truncated: false, redacted: false, log: "short" });
   });
 
   it("rejects a maxBytes above the documented tail ceiling", async () => {
@@ -302,6 +303,112 @@ describe("read endpoints", () => {
     await expect(
       executeTool(options, TOOL_NAMES.getErrorLog, { maxBytes: LOG_TAIL_MAX_BYTES + 1 }),
     ).rejects.toThrow(InvalidParameterError);
+  });
+});
+
+/**
+ * The two tools that return provider-composed text are the two that can hand
+ * an agent the operator's credentials, and the plugin SDK has no risk level or
+ * ask-first field on a registered tool, so there is no approval gate to fall
+ * back on. `redact.spec.ts` covers the patterns; these cover the wiring — that
+ * each tool actually runs the scrub, on the right text, in the right order.
+ */
+describe("credential scrubbing", () => {
+  const JWT =
+    "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJhYmMxMjMifQ.s1gnatureV4lue_abc123";
+
+  it("get_error_log removes the plugin's own configured token", async () => {
+    const { options } = recorder(
+      [`ERROR Request failed: Authorization: Bearer ${TOKEN}\n`],
+      { contentType: "text/plain" },
+    );
+    const result = (await executeTool(options, TOOL_NAMES.getErrorLog, {})) as {
+      redacted: boolean;
+      log: string;
+    };
+    expect(result.log).not.toContain(TOKEN);
+    expect(result.redacted).toBe(true);
+  });
+
+  it("get_error_log removes a credential in a logged request URL", async () => {
+    const { options } = recorder(
+      ["ERROR [homeassistant.components.rest] https://api.test/v1?api_key=A1b2C3d4E5f6G7h8 failed\n"],
+      { contentType: "text/plain" },
+    );
+    const result = (await executeTool(options, TOOL_NAMES.getErrorLog, {})) as {
+      redacted: boolean;
+      log: string;
+    };
+    expect(result.log).not.toContain("A1b2C3d4E5f6G7h8");
+    expect(result.log).toContain("api_key=");
+    expect(result.redacted).toBe(true);
+  });
+
+  it("scrubs before cutting the tail, so truncation cannot split a token", async () => {
+    // The token straddles the cut: scrubbing the tail instead of the log would
+    // leave the pattern half a credential to match, and hand over the rest.
+    const log = `${"filler line\n".repeat(200)}Authorization: Bearer ${JWT}\n`;
+    const maxBytes = 1024;
+    const { options } = recorder([log], { contentType: "text/plain" });
+    const result = (await executeTool(options, TOOL_NAMES.getErrorLog, {
+      maxBytes,
+    })) as { truncated: boolean; redacted: boolean; log: string };
+    expect(result.truncated).toBe(true);
+    expect(result.log).not.toContain(JWT.slice(0, 24));
+    expect(result.log).toContain(REDACTION_MARKER);
+    expect(result.redacted).toBe(true);
+  });
+
+  it("check_config removes an expanded !secret from a validation error", async () => {
+    // Home Assistant substitutes `!secret` before it validates, so the value
+    // quoted back here is the secret, not the reference the operator wrote.
+    const { options } = recorder([
+      {
+        result: "invalid",
+        errors:
+          "Invalid config for [notify.smtp]: not a valid value for dictionary value @ data['password']. Got 'hunter2-correct-horse'",
+      },
+    ]);
+    const result = (await executeTool(options, TOOL_NAMES.checkConfig, {})) as {
+      result: string;
+      errors: string;
+    };
+    expect(result.errors).not.toContain("hunter2-correct-horse");
+    expect(result.errors).toContain(REDACTION_MARKER);
+    // The shape Home Assistant returned is preserved, scrubbed in place.
+    expect(result.result).toBe("invalid");
+  });
+
+  it("check_config scrubs wherever the errors live in the response", async () => {
+    const { options } = recorder([
+      {
+        result: "invalid",
+        errors: { "notify.smtp": [`token: ${TOKEN}`], detail: { password: "ok" } },
+      },
+    ]);
+    const result = (await executeTool(options, TOOL_NAMES.checkConfig, {})) as {
+      errors: { "notify.smtp": string[]; detail: { password: string } };
+    };
+    expect(result.errors["notify.smtp"][0]).not.toContain(TOKEN);
+    expect(result.errors.detail.password).toBe(REDACTION_MARKER);
+  });
+
+  it("leaves a clean log and a valid config untouched", async () => {
+    const clean =
+      "2026-10-16 01:02:03 WARNING (MainThread) [homeassistant.components.sensor] Updating sensor.outdoor_temperature took too long\n";
+    const { options } = recorder([clean], { contentType: "text/plain" });
+    const log = (await executeTool(options, TOOL_NAMES.getErrorLog, {})) as {
+      redacted: boolean;
+      log: string;
+    };
+    expect(log.log).toBe(clean);
+    expect(log.redacted).toBe(false);
+
+    const valid = recorder([{ result: "valid", errors: null }]);
+    expect(await executeTool(valid.options, TOOL_NAMES.checkConfig, {})).toEqual({
+      result: "valid",
+      errors: null,
+    });
   });
 });
 

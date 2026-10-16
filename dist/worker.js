@@ -42066,6 +42066,92 @@ var CONFIG_KEYS = {
   token: "token"
 };
 
+// src/redact.ts
+var REDACTION_MARKER = "[redacted-credential]";
+var MIN_LITERAL_TOKEN_LENGTH = 8;
+var SENSITIVE_KEY = String.raw`(?:api[_-]?password|api[_-]?key|apikey|access[_-]?token|refresh[_-]?token|id[_-]?token|auth[_-]?token|bearer[_-]?token|client[_-]?secret|consumer[_-]?secret|private[_-]?key|secret[_-]?key|app[_-]?key|app[_-]?secret|password|passwd|passphrase|pwd|secret|token|credential|credentials|auth)`;
+var CREDENTIAL_HEADER = String.raw`(?:proxy-authorization|authorization|x-ha-access|x-auth-token|x-api-key|x-apikey)`;
+var AUTH_SCHEME = String.raw`(?:bearer|basic|digest|token|apikey)`;
+var AUTHORIZATION_HEADER = new RegExp(
+  String.raw`(["']?\b${CREDENTIAL_HEADER}\b["']?\s*[:=]\s*["']?)(${AUTH_SCHEME}\s+)?([^\s"',;)\]}]+)`,
+  "gi"
+);
+var CREDENTIAL_QUERY_PARAM = new RegExp(
+  String.raw`([?&](?:${SENSITIVE_KEY}|authsig|signature|sig|code|key)=)([^&\s"'<>\\)\]}]+)`,
+  "gi"
+);
+var SENSITIVE_ASSIGNMENT = new RegExp(
+  String.raw`(["'\[]?\b${SENSITIVE_KEY}\b["'\]]?\s*[:=]\s*)((["'])(?:(?!\3)[^\n])*\3|[^\s,;)\]}\n]+)`,
+  "gi"
+);
+var SENSITIVE_GOT_VALUE = new RegExp(
+  String.raw`(\[["']${SENSITIVE_KEY}["']\][^\n]{0,200}?\bGot\s+)(["'](?:[^"'\n]*)["']|[^\s,;)\]}\n]+)`,
+  "gi"
+);
+var JWT = /(?<![A-Za-z0-9_-])eyJ[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]{4,}(?:\.[A-Za-z0-9_-]+)?/g;
+var LONG_OPAQUE_SECRET = /(?<![A-Za-z0-9_-])(?=[A-Za-z0-9_-]*[A-Za-z])(?=[A-Za-z0-9_-]*[0-9])[A-Za-z0-9_-]{40,}(?![A-Za-z0-9_-])/g;
+function escapeRegExp(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+function alreadyRedacted(value) {
+  return value.startsWith(REDACTION_MARKER.slice(0, "[redacted".length));
+}
+function tokenSpellings(token) {
+  const trimmed = token.trim();
+  if (trimmed.length < MIN_LITERAL_TOKEN_LENGTH) return [];
+  const spellings = /* @__PURE__ */ new Set([trimmed, encodeURIComponent(trimmed)]);
+  return [...spellings];
+}
+function redactCredentials(text2, token) {
+  if (text2 === "") return text2;
+  let out = text2;
+  if (token) {
+    for (const spelling of tokenSpellings(token)) {
+      out = out.replace(new RegExp(escapeRegExp(spelling), "g"), REDACTION_MARKER);
+    }
+  }
+  out = out.replace(
+    AUTHORIZATION_HEADER,
+    (match, prefix, scheme, value) => alreadyRedacted(value) ? match : `${prefix}${scheme ?? ""}${REDACTION_MARKER}`
+  );
+  out = out.replace(
+    CREDENTIAL_QUERY_PARAM,
+    (match, prefix, value) => alreadyRedacted(value) ? match : `${prefix}${REDACTION_MARKER}`
+  );
+  out = out.replace(
+    SENSITIVE_GOT_VALUE,
+    (match, prefix, value) => /^(?:None|null)$/i.test(value) || alreadyRedacted(value) ? match : `${prefix}${REDACTION_MARKER}`
+  );
+  out = out.replace(
+    SENSITIVE_ASSIGNMENT,
+    (match, prefix, value) => alreadyRedacted(value) ? match : `${prefix}${REDACTION_MARKER}`
+  );
+  out = out.replace(JWT, REDACTION_MARKER);
+  out = out.replace(LONG_OPAQUE_SECRET, REDACTION_MARKER);
+  return out;
+}
+var SENSITIVE_KEY_NAME = new RegExp(String.raw`^${SENSITIVE_KEY}s?$`, "i");
+function redactDeep(value, token, key) {
+  if (typeof value === "string") {
+    if (key !== void 0 && SENSITIVE_KEY_NAME.test(key) && value !== "") {
+      return REDACTION_MARKER;
+    }
+    return redactCredentials(value, token);
+  }
+  if (Array.isArray(value)) {
+    return value.map((entry) => redactDeep(entry, token, key));
+  }
+  if (value !== null && typeof value === "object") {
+    return Object.fromEntries(
+      Object.entries(value).map(([childKey, child]) => [
+        childKey,
+        redactDeep(child, token, childKey)
+      ])
+    );
+  }
+  return value;
+}
+
 // src/validate.ts
 var InvalidParameterError = class extends Error {
 };
@@ -42346,7 +42432,10 @@ async function executeTool(options, toolName, parameters) {
     }
     case TOOL_NAMES.checkConfig: {
       rejectUnknownKeys(params, []);
-      return parseJson(await run("/api/config/core/check_config", {}));
+      return redactDeep(
+        parseJson(await run("/api/config/core/check_config", {})),
+        options.token
+      );
     }
     case TOOL_NAMES.getHistory: {
       rejectUnknownKeys(params, [
@@ -42416,11 +42505,17 @@ async function executeTool(options, toolName, parameters) {
     case TOOL_NAMES.getErrorLog: {
       rejectUnknownKeys(params, ["maxBytes"]);
       const maxBytes = optionalInteger(params, "maxBytes", 1024, LOG_TAIL_MAX_BYTES) ?? LOG_TAIL_MAX_BYTES;
-      const log = Buffer.from(await run("/api/error_log"), "utf8");
+      const log = Buffer.from(
+        redactCredentials(await run("/api/error_log"), options.token),
+        "utf8"
+      );
+      const tail = log.subarray(Math.max(0, log.byteLength - maxBytes)).toString("utf8");
       return {
         truncated: log.byteLength > maxBytes,
-        // The tail is the useful end of a log file.
-        log: log.subarray(Math.max(0, log.byteLength - maxBytes)).toString("utf8")
+        // True when the text below still carries a marker, so an agent reading
+        // an odd-looking log knows the oddity is this plugin's doing.
+        redacted: tail.includes(REDACTION_MARKER),
+        log: tail
       };
     }
     default:
@@ -42522,7 +42617,7 @@ var TOOL_DECLARATIONS = [
   {
     name: TOOL_NAMES.checkConfig,
     displayName: "Home Assistant: check configuration",
-    description: "Validate the current Home Assistant configuration and return any errors. Read-only: it checks the config on disk and changes nothing.",
+    description: "Validate the current Home Assistant configuration and return any errors. Read-only: it checks the config on disk and changes nothing. Home Assistant expands !secret before it validates, so credential-shaped text in the errors is replaced with [redacted-credential] before you see it \u2014 ask the operator if you need the real value.",
     parametersSchema: object2({})
   },
   {
@@ -42557,7 +42652,7 @@ var TOOL_DECLARATIONS = [
   {
     name: TOOL_NAMES.getErrorLog,
     displayName: "Home Assistant: get error log",
-    description: "Get the tail of the Home Assistant error log. Use this to diagnose a failing integration or a broken automation.",
+    description: "Get the tail of the Home Assistant error log. Use this to diagnose a failing integration or a broken automation. Credential-shaped text \u2014 tokens, authorization headers, credentials in logged request URLs \u2014 is replaced with [redacted-credential] before you see it, and the redacted flag says whether anything in the returned tail was replaced.",
     parametersSchema: object2({
       maxBytes: {
         type: "integer",
