@@ -127,7 +127,7 @@ export const TOOL_DECLARATIONS: readonly ToolDeclaration[] = [
     name: TOOL_NAMES.checkConfig,
     displayName: "Home Assistant: check configuration",
     description:
-      "Validate the current Home Assistant configuration and return any errors. Read-only: it checks the config on disk and changes nothing.",
+      "Validate the current Home Assistant configuration and return any errors. Read-only: it checks the config on disk and changes nothing. Home Assistant expands !secret before it validates, so credential-shaped text in the errors is replaced with [redacted-credential] before you see it — ask the operator if you need the real value.",
     parametersSchema: object({}),
   },
   {
@@ -166,7 +166,7 @@ export const TOOL_DECLARATIONS: readonly ToolDeclaration[] = [
     name: TOOL_NAMES.getErrorLog,
     displayName: "Home Assistant: get error log",
     description:
-      "Get the tail of the Home Assistant error log. Use this to diagnose a failing integration or a broken automation.",
+      "Get the tail of the Home Assistant error log. Use this to diagnose a failing integration or a broken automation. Credential-shaped text — tokens, authorization headers, credentials in logged request URLs — is replaced with [redacted-credential] before you see it, and the redacted flag says whether anything in the returned tail was replaced.",
     parametersSchema: object({
       maxBytes: {
         type: "integer",

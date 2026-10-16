@@ -14,13 +14,18 @@ Nine tools, all reads:
 | `list_services` | What services exist; pass a domain for the fields each accepts. |
 | `render_template` | What a Jinja2 template evaluates to against live state. |
 | `get_config` | Version, time zone, unit system, loaded components. |
-| `check_config` | Whether the current configuration validates. |
+| `check_config` | Whether the current configuration validates. Credentials scrubbed. |
 | `get_history` | How an entity actually behaved over a time window. |
 | `get_logbook` | What happened, in human-readable form, and what triggered it. |
-| `get_error_log` | The tail of the error log. |
+| `get_error_log` | The tail of the error log. Credentials scrubbed. |
 
 There is no tool that changes anything. That is a deliberate design decision
 with a specific cause — see [Why this plugin is read-only](#why-this-plugin-is-read-only).
+
+Two of those tools return text Home Assistant composed rather than fields this
+plugin chose, and that text routinely carries the operator's credentials. Both
+are scrubbed before an agent sees them — see [Why two tools are
+scrubbed](#why-two-tools-are-scrubbed).
 
 ## Install
 
@@ -297,6 +302,77 @@ the right answer and the policy screen means what it says.
 If you want governed device control, that belongs in a curated catalog
 connector, where the risk class is declared and reviewed and approvals execute.
 
+## Why two tools are scrubbed
+
+`get_error_log` and `check_config` return text Home Assistant wrote. Every other
+tool returns fields this plugin picked out of a documented JSON shape. That
+difference is the whole problem: provider-composed text carries whatever the
+provider happened to put in it, and on these two endpoints that routinely
+includes the operator's credentials.
+
+- An integration that fails a request logs the request. A URL built from a
+  configured API key carries the key in its query string, and several
+  integrations log the request headers too, `Authorization` included.
+- `check_config` validates the configuration **after** `!secret` substitution.
+  So when voluptuous quotes the offending value back — `not a valid value for
+  dictionary value @ data['password']. Got '…'` — the quoted value is the
+  expanded secret, not the `!secret` reference the operator wrote.
+
+There is no approval gate to fall back on. A plugin's manifest tool declaration
+is `{name, displayName, description, parametersSchema}`: no risk level, no
+ask-first field (see [Why this plugin is
+read-only](#why-this-plugin-is-read-only)), so an operator cannot make these two
+tools prompt. Any agent the plugin's tools are granted to calls them freely.
+Scrubbing in the plugin is the only control that exists.
+
+`src/redact.ts` runs two kinds of rule, and the difference matters when reading
+a redacted log:
+
+- **Context rules** key off a credential-naming word in the text itself, or a
+  position that names the value — `authorization:` and friends,
+  `?api_password=` / `?token=` / `?access_token=` / `?api_key=`, `password: …`
+  assignments, the bracketed key in a voluptuous error, and the userinfo of a
+  `http://user:password@host/…` URL (how `generic` camera, `mjpeg`, `ffmpeg`,
+  `rest` and `scrape` log a failing request). These are precise, and they keep
+  the key, the user and the auth scheme so the error still says what failed.
+- **Shape rules** key off the value alone: a JWT (the shape of a Home Assistant
+  long-lived token), and any run of 40+ opaque token characters mixing letters
+  and digits. These are the backstop for a credential nobody named, and they
+  over-redact on purpose — a long opaque blob is rarely the diagnostic part of a
+  log line. An auto-generated entity ID long enough to clear the floor is
+  over-redacted too, which is the trade being accepted: a discriminator loose
+  enough to spare it is loose enough to be a way around the backstop.
+
+The configured token itself is matched literally, raw and percent-encoded, and
+first: it is the one secret whose exact value the plugin knows, so it never
+depends on a pattern recognising it.
+
+Every removal leaves `[redacted-credential]` behind — nothing is dropped
+silently, so a reader can tell "Home Assistant said nothing here" from "the
+plugin took something out". `get_error_log` also returns `redacted: true` when
+the tail it hands back still carries a marker. The log is scrubbed **before**
+the tail is cut, not after: slicing first would offer the patterns half a
+credential to match.
+
+For `check_config` the whole parsed response is walked, whatever its shape,
+because the field the errors live in has moved between Home Assistant releases.
+A string sitting under a credential-named key is removed on the strength of the
+key alone; the keys themselves are kept, since `password` as a key name is not a
+secret and blanking it would hide which setting the error is about.
+
+**What this does not do.** Pattern matching cannot recognise a secret that looks
+like ordinary prose, so this reduces exposure, it does not eliminate it. Three
+known gaps: a credential logged with no label and no credential-like shape
+survives; the opaque-run rule's character class is base64**url**, so an
+unlabelled standard-alphabet base64 secret containing `+` or `/` is split into
+runs too short to match (widening the class would swallow long filesystem and
+module paths, so labelled cases are left to the context rules); and the scrub
+is not applied to the structured tools — a camera
+entity's `access_token` attribute still reaches an agent through `get_state` or
+`list_entities`. Extending `redactDeep` to those is a one-line change if you
+want it; it is left off because those tools' output is values an agent is
+expected to read exactly.
+
 ## Why every result is an object
 
 Every tool returns a JSON **object**, and three of them wrap an array to do it.
@@ -384,7 +460,7 @@ underlying request text back to the agent.
 ```bash
 npm install
 npm run typecheck
-npm test          # 102 unit tests
+npm test          # 161 unit tests
 npm run build     # writes dist/worker.js and dist/manifest.js
 node scripts/smoke.mjs
 ```
@@ -395,7 +471,11 @@ worker's `config.get` and `secrets.resolve` calls — and drives a real tool cal
 against a stub Home Assistant on `127.0.0.1`. The loopback address is the point:
 it is exactly the case the host's gated fetch helper refuses. It also drives
 every tool through the built worker and asserts each result would survive the
-host's MCP forwarding — see "Why every result is an object".
+host's MCP forwarding — see "Why every result is an object". The stub's
+`/api/error_log` and `/api/config/core/check_config` answer with credentials in
+them, and the script asserts no credential appears anywhere in the forwarded
+result — `content` and `data` both, since the agent reads one and its client
+reads the other.
 
 Commit `dist/*.js` when you change `src/`, since installs read the built
 output. Sourcemaps are generated but not committed — they are mostly inlined
@@ -426,6 +506,13 @@ Two consequences worth recording, because both were open questions:
 - **A plugin tool's result survives the round trip** once `data` is an object.
   The host forwards it as `structuredContent` and the agent's MCP client accepts
   it.
+
+**The scrub has not been run against a real instance's error log.** The rules in
+`src/redact.ts` were written against the shapes Home Assistant and voluptuous
+documentably produce, and are covered by fixtures and by the smoke test's stub —
+but no real log tail has been read through them, so the false-positive rate on
+one installation's actual logging is unmeasured. The failure mode to watch for
+is over-redaction (a marker where a diagnostic value should be), not a leak.
 
 The instance-config tests reproduce the host's save-time validator — Ajv with
 formats plus the host's permissive `secret-ref` format, assembled the same way
