@@ -64,13 +64,15 @@ const ha = createServer((req, res) => {
   }
   // The two endpoints that return provider-composed text, answered the way a
   // real instance does when credentials are in play: an integration logging the
-  // URL it failed on, a retry logging its own authorization header, and a
-  // validation error quoting a value Home Assistant expanded from `!secret`.
+  // URL it failed on, a camera logging a URL with basic-auth in it, a retry
+  // logging its own authorization header, and a validation error quoting a
+  // value Home Assistant expanded from `!secret`.
   if (req.url === "/api/error_log") {
     res.writeHead(200, { "content-type": "text/plain" }).end(
       [
         "2026-10-16 01:02:03 ERROR (MainThread) [homeassistant.components.rest] Fetch failed: https://api.example.com/v1?api_key=A1b2C3d4E5f6G7h8 returned 401",
-        `2026-10-16 01:02:04 ERROR (MainThread) [custom.integration] Retrying with Authorization: Bearer ${TOKEN}`,
+        "2026-10-16 01:02:04 ERROR (MainThread) [homeassistant.components.generic.camera] Timeout getting camera image from http://admin:hunter2@192.168.1.64/Streaming/channels/101/picture",
+        `2026-10-16 01:02:05 ERROR (MainThread) [custom.integration] Retrying with Authorization: Bearer ${TOKEN}`,
         "",
       ].join("\n"),
     );
@@ -274,7 +276,7 @@ try {
    * `data` both, since the agent reads one and its client reads the other.
    */
   for (const [tool, secrets] of [
-    ["get_error_log", [TOKEN, "A1b2C3d4E5f6G7h8"]],
+    ["get_error_log", [TOKEN, "A1b2C3d4E5f6G7h8", "hunter2"]],
     ["check_config", ["hunter2-correct-horse"]],
   ]) {
     const call = await send("executeTool", {

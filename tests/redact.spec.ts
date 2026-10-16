@@ -101,6 +101,48 @@ describe("redactCredentials", () => {
     });
   });
 
+  /**
+   * `generic` camera, `mjpeg`, `ffmpeg`, `rest` and `scrape` are all configured
+   * with a URL that can carry basic-auth, and every one of them logs that URL
+   * verbatim on a timeout or a non-200. The password is usually far too short
+   * for the shape rules to reach, so the position after the colon is the only
+   * thing naming it.
+   */
+  describe("credentials in URL userinfo", () => {
+    it("redacts the password a failing camera request logs", () => {
+      expect(
+        redactCredentials(
+          "2026-10-16 01:02:03 ERROR (MainThread) [homeassistant.components.generic.camera] Timeout getting camera image from http://admin:hunter2@192.168.1.64/Streaming/channels/101/picture",
+        ),
+      ).toBe(
+        `2026-10-16 01:02:03 ERROR (MainThread) [homeassistant.components.generic.camera] Timeout getting camera image from http://admin:${REDACTION_MARKER}@192.168.1.64/Streaming/channels/101/picture`,
+      );
+    });
+
+    it("keeps the user, which says which account failed", () => {
+      expect(redactCredentials("rest: https://svc:s3cret@api.test/v1 returned 401")).toBe(
+        `rest: https://svc:${REDACTION_MARKER}@api.test/v1 returned 401`,
+      );
+    });
+
+    it("takes the whole password when it contains an unencoded @", () => {
+      // Stopping at the first `@` would leave `ssw0rd123` in the log.
+      const out = redactCredentials("Connecting to mqtt://user:p@ssw0rd123@broker.test:1883");
+      expect(out).toBe(`Connecting to mqtt://user:${REDACTION_MARKER}@broker.test:1883`);
+      expect(out).not.toContain("ssw0rd123");
+    });
+
+    it.each([
+      ["a URL with no userinfo", "Timeout fetching hue data from http://10.0.0.5/api/lights"],
+      ["a host:port with no userinfo", "Cannot connect to https://ha.test:8123/api/states"],
+      // The value may not cross `?`, so an address in a query string is not
+      // mistaken for a password followed by a host.
+      ["an @ in a query string", "Redirecting to https://ha.test:8123?to=admin@example.test"],
+    ])("leaves %s", (_label, line) => {
+      expect(redactCredentials(line)).toBe(line);
+    });
+  });
+
   describe("credential assignments in echoed config", () => {
     it.each([
       ["a YAML key", "Setup failed for smtp: password: hunter2", "hunter2"],
@@ -111,6 +153,9 @@ describe("redactCredentials", () => {
       ],
       ["an equals form", "client_secret=9f8e7d6c5b4a", "9f8e7d6c5b4a"],
       ["a quoted value with spaces", `password: "p@ss w0rd here"`, "p@ss w0rd here"],
+      // Standard-alphabet base64 is below the shape rule's reach, so the label
+      // is what has to catch it.
+      ["a cookie header", "GET /x failed, cookie=ab+cd/ef+gh/ij=", "ab+cd/ef+gh/ij="],
     ])("redacts %s", (_label, line, secret) => {
       const out = redactCredentials(line);
       expect(out).not.toContain(secret);
@@ -175,6 +220,20 @@ describe("redactCredentials", () => {
     ])("leaves %s, which is not credential-shaped", (_label, text) => {
       expect(redactCredentials(`Saw ${text} here`)).toBe(`Saw ${text} here`);
     });
+
+    /**
+     * Underscore is inside the token class, so an auto-generated entity ID that
+     * is long enough and carries a digit is over-redacted. This is the chosen
+     * trade, not an oversight: a discriminator loose enough to spare entity IDs
+     * is a way around the backstop. Pinned here so changing it is a decision.
+     */
+    it("over-redacts a long auto-generated entity ID, by design", () => {
+      expect(
+        redactCredentials(
+          "Unable to find entity sensor.basement_dehumidifier_power_1234567890_energy",
+        ),
+      ).toBe(`Unable to find entity sensor.${REDACTION_MARKER}`);
+    });
   });
 
   /**
@@ -190,6 +249,11 @@ describe("redactCredentials", () => {
       "Error doing job: Task exception was never retrieved (None)",
       "Timeout fetching hue data from http://10.0.0.5/api/lights",
       "Platform template does not generate unique IDs. ID sensor_1 is already used",
+      // `auth` is a real domain, so this preamble is a line check_config
+      // genuinely emits. Allowing a bracketed key to open an assignment ate
+      // `expected` — the word saying what was actually wrong.
+      "Invalid config for [auth]: expected a dictionary. Got None",
+      "Invalid config for [secret]: required key not provided @ data['host']",
     ])("passes through %s", (line) => {
       expect(redactCredentials(line, CONFIGURED)).toBe(line);
     });
@@ -250,6 +314,15 @@ describe("redactDeep", () => {
       ok: false,
       list: [],
     });
+  });
+
+  it("reaches a value nested under a credential-named key", () => {
+    // The walk is shape-agnostic because the error field moves between
+    // releases, so one level of nesting must not route a value around it.
+    const out = redactDeep({ token: { raw: "letmein" } }) as {
+      token: { raw: string };
+    };
+    expect(out.token.raw).toBe(REDACTION_MARKER);
   });
 
   it("scrubs every element of a list under a credential-named key", () => {

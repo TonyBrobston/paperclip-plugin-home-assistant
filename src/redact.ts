@@ -18,9 +18,10 @@
  *
  * Two kinds of rule run, and the distinction is the honest part of this file:
  *
- * - **Context rules** key off a credential-naming word that is right there in
- *   the text (`authorization:`, `?api_key=`, `data['password']`). These are
- *   precise, and they are the ones worth trusting.
+ * - **Context rules** key off a credential-naming word, or a position that
+ *   names the value, right there in the text (`authorization:`, `?api_key=`,
+ *   `data['password']`, the userinfo of a `http://user:pass@host` URL). These
+ *   are precise, and they are the ones worth trusting.
  * - **Shape rules** key off the look of the value alone (a JWT, a long opaque
  *   run of token characters). These are a backstop for a credential whose name
  *   this file never anticipated, and they over-redact by design — a 40-character
@@ -54,7 +55,7 @@ const MIN_LITERAL_TOKEN_LENGTH = 8;
  * parameter name, and as the bracketed key in a voluptuous validation error.
  * Written as one source string so those three rules cannot drift apart.
  */
-const SENSITIVE_KEY = String.raw`(?:api[_-]?password|api[_-]?key|apikey|access[_-]?token|refresh[_-]?token|id[_-]?token|auth[_-]?token|bearer[_-]?token|client[_-]?secret|consumer[_-]?secret|private[_-]?key|secret[_-]?key|app[_-]?key|app[_-]?secret|password|passwd|passphrase|pwd|secret|token|credential|credentials|auth)`;
+const SENSITIVE_KEY = String.raw`(?:api[_-]?password|api[_-]?key|apikey|access[_-]?token|refresh[_-]?token|id[_-]?token|auth[_-]?token|bearer[_-]?token|client[_-]?secret|consumer[_-]?secret|private[_-]?key|secret[_-]?key|app[_-]?key|app[_-]?secret|password|passwd|passphrase|pwd|secret|token|credential|credentials|cookie|auth)`;
 
 /**
  * Header names that carry a credential as their whole value.
@@ -101,9 +102,26 @@ const CREDENTIAL_QUERY_PARAM = new RegExp(
  * rather than down to its first space.
  */
 const SENSITIVE_ASSIGNMENT = new RegExp(
-  String.raw`(["'\[]?\b${SENSITIVE_KEY}\b["'\]]?\s*[:=]\s*)((["'])(?:(?!\3)[^\n])*\3|[^\s,;)\]}\n]+)`,
+  String.raw`(["']?\b${SENSITIVE_KEY}\b["']?\s*[:=]\s*)((["'])(?:(?!\3)[^\n])*\3|[^\s,;)\]}\n]+)`,
   "gi",
 );
+
+/**
+ * A credential in a URL's userinfo: `scheme://user:password@host/…`.
+ *
+ * `generic` camera, `mjpeg`, `ffmpeg`, `rest` and `scrape` are all configured
+ * with a URL that can carry basic-auth, and all of them log that URL when a
+ * request fails. The position after the colon is what names the value, so this
+ * belongs with the context rules — the password is usually far too short for
+ * {@link LONG_OPAQUE_SECRET} to reach.
+ *
+ * The value is matched greedily up to the *last* `@` before the host, because
+ * an unencoded `@` inside a password is common enough that stopping at the
+ * first one would leave the tail of the password in the log. It may not cross
+ * `/`, `?` or `#`, which is what keeps the rule off a portless-looking URL
+ * whose query happens to contain an `@` (`https://host:8123?to=a@b.test`).
+ */
+const URL_USERINFO = /([a-z][a-z0-9+.-]*:\/\/[^\s:/?#@"']+:)([^\s/?#"']+)(?=@)/gi;
 
 /**
  * voluptuous' "offending value" clause for a credential key.
@@ -139,12 +157,24 @@ const JWT = /(?<![A-Za-z0-9_-])eyJ[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]{4,}(?:\.[A-Za
  * The last line of defence, for a credential this file has no name for: a
  * supervisor token, a vendor API key logged without a label, a webhook ID. The
  * 40-character floor and the letter-and-digit requirement are what keep it off
- * ordinary log text — words, module paths, ISO timestamps and entity IDs are
- * all either shorter or broken up by characters outside the class.
+ * most ordinary log text — words, module paths and ISO timestamps are all
+ * either shorter or broken up by characters outside the class.
  *
- * It does over-redact: a git SHA or a long registry ID in an error message is
- * replaced too. That is the intended trade. The marker says what happened, and
- * an agent that needs the unredacted value can ask the operator for it.
+ * It does over-redact, and underscore being inside the class means entity IDs
+ * are part of that: an auto-generated `sensor.<40+ chars with a digit>` from
+ * Z-Wave JS, Zigbee2MQTT, Shelly or ESPHome is replaced, which can empty out an
+ * "Unable to find entity …" line. A git SHA or a long registry ID goes the same
+ * way. That is the intended trade and it is deliberately not narrowed here: a
+ * discriminator loose enough to keep long entity IDs is loose enough to be a
+ * way around the backstop, and this rule exists for the credential nobody
+ * named. The marker says what happened, and an agent that needs the unredacted
+ * value can ask the operator for it.
+ *
+ * The class is base64**url** (`-` and `_`). A standard-alphabet base64 secret
+ * containing `+` or `/` is split into sub-40 runs and survives this rule —
+ * widening the class is not the fix, because `/` would swallow long filesystem
+ * and module paths wholesale. Labelled cases are the context rules' job, which
+ * is why `cookie` is in {@link SENSITIVE_KEY}.
  */
 const LONG_OPAQUE_SECRET =
   /(?<![A-Za-z0-9_-])(?=[A-Za-z0-9_-]*[A-Za-z])(?=[A-Za-z0-9_-]*[0-9])[A-Za-z0-9_-]{40,}(?![A-Za-z0-9_-])/g;
@@ -210,6 +240,11 @@ export function redactCredentials(text: string, token?: string): string {
         : `${prefix}${scheme ?? ""}${REDACTION_MARKER}`,
   );
   out = out.replace(
+    URL_USERINFO,
+    (match, prefix: string, value: string) =>
+      alreadyRedacted(value) ? match : `${prefix}${REDACTION_MARKER}`,
+  );
+  out = out.replace(
     CREDENTIAL_QUERY_PARAM,
     (match, prefix: string, value: string) =>
       alreadyRedacted(value) ? match : `${prefix}${REDACTION_MARKER}`,
@@ -255,6 +290,11 @@ const SENSITIVE_KEY_NAME = new RegExp(String.raw`^${SENSITIVE_KEY}s?$`, "i");
  * pattern-matched, because the key already said what it is. Keys themselves are
  * left alone: `password` as a key name is not a secret, and blanking it would
  * hide which setting the error is about.
+ *
+ * `key` is the nearest credential-named *ancestor*, not the immediate parent
+ * key, so everything under `{ token: { raw: … } }` is covered. The same reason
+ * the walk is shape-agnostic applies here: a release that nests the value one
+ * level deeper must not route it around the scrub.
  */
 export function redactDeep(value: unknown, token?: string, key?: string): unknown {
   if (typeof value === "string") {
@@ -270,7 +310,7 @@ export function redactDeep(value: unknown, token?: string, key?: string): unknow
     return Object.fromEntries(
       Object.entries(value as Record<string, unknown>).map(([childKey, child]) => [
         childKey,
-        redactDeep(child, token, childKey),
+        redactDeep(child, token, SENSITIVE_KEY_NAME.test(childKey) ? childKey : key),
       ]),
     );
   }

@@ -328,16 +328,20 @@ Scrubbing in the plugin is the only control that exists.
 `src/redact.ts` runs two kinds of rule, and the difference matters when reading
 a redacted log:
 
-- **Context rules** key off a credential-naming word in the text itself —
-  `authorization:` and friends, `?api_password=` / `?token=` / `?access_token=`
-  / `?api_key=`, `password: …` assignments, and the bracketed key in a
-  voluptuous error. These are precise, and they keep the key and the auth scheme
-  so the error still says what failed.
+- **Context rules** key off a credential-naming word in the text itself, or a
+  position that names the value — `authorization:` and friends,
+  `?api_password=` / `?token=` / `?access_token=` / `?api_key=`, `password: …`
+  assignments, the bracketed key in a voluptuous error, and the userinfo of a
+  `http://user:password@host/…` URL (how `generic` camera, `mjpeg`, `ffmpeg`,
+  `rest` and `scrape` log a failing request). These are precise, and they keep
+  the key, the user and the auth scheme so the error still says what failed.
 - **Shape rules** key off the value alone: a JWT (the shape of a Home Assistant
   long-lived token), and any run of 40+ opaque token characters mixing letters
   and digits. These are the backstop for a credential nobody named, and they
   over-redact on purpose — a long opaque blob is rarely the diagnostic part of a
-  log line.
+  log line. An auto-generated entity ID long enough to clear the floor is
+  over-redacted too, which is the trade being accepted: a discriminator loose
+  enough to spare it is loose enough to be a way around the backstop.
 
 The configured token itself is matched literally, raw and percent-encoded, and
 first: it is the one secret whose exact value the plugin knows, so it never
@@ -357,9 +361,13 @@ key alone; the keys themselves are kept, since `password` as a key name is not a
 secret and blanking it would hide which setting the error is about.
 
 **What this does not do.** Pattern matching cannot recognise a secret that looks
-like ordinary prose, so this reduces exposure, it does not eliminate it. Two
+like ordinary prose, so this reduces exposure, it does not eliminate it. Three
 known gaps: a credential logged with no label and no credential-like shape
-survives, and the scrub is not applied to the structured tools — a camera
+survives; the opaque-run rule's character class is base64**url**, so an
+unlabelled standard-alphabet base64 secret containing `+` or `/` is split into
+runs too short to match (widening the class would swallow long filesystem and
+module paths, so labelled cases are left to the context rules); and the scrub
+is not applied to the structured tools — a camera
 entity's `access_token` attribute still reaches an agent through `get_state` or
 `list_entities`. Extending `redactDeep` to those is a one-line change if you
 want it; it is left off because those tools' output is values an agent is

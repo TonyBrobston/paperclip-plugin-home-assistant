@@ -42069,7 +42069,7 @@ var CONFIG_KEYS = {
 // src/redact.ts
 var REDACTION_MARKER = "[redacted-credential]";
 var MIN_LITERAL_TOKEN_LENGTH = 8;
-var SENSITIVE_KEY = String.raw`(?:api[_-]?password|api[_-]?key|apikey|access[_-]?token|refresh[_-]?token|id[_-]?token|auth[_-]?token|bearer[_-]?token|client[_-]?secret|consumer[_-]?secret|private[_-]?key|secret[_-]?key|app[_-]?key|app[_-]?secret|password|passwd|passphrase|pwd|secret|token|credential|credentials|auth)`;
+var SENSITIVE_KEY = String.raw`(?:api[_-]?password|api[_-]?key|apikey|access[_-]?token|refresh[_-]?token|id[_-]?token|auth[_-]?token|bearer[_-]?token|client[_-]?secret|consumer[_-]?secret|private[_-]?key|secret[_-]?key|app[_-]?key|app[_-]?secret|password|passwd|passphrase|pwd|secret|token|credential|credentials|cookie|auth)`;
 var CREDENTIAL_HEADER = String.raw`(?:proxy-authorization|authorization|x-ha-access|x-auth-token|x-api-key|x-apikey)`;
 var AUTH_SCHEME = String.raw`(?:bearer|basic|digest|token|apikey)`;
 var AUTHORIZATION_HEADER = new RegExp(
@@ -42081,9 +42081,10 @@ var CREDENTIAL_QUERY_PARAM = new RegExp(
   "gi"
 );
 var SENSITIVE_ASSIGNMENT = new RegExp(
-  String.raw`(["'\[]?\b${SENSITIVE_KEY}\b["'\]]?\s*[:=]\s*)((["'])(?:(?!\3)[^\n])*\3|[^\s,;)\]}\n]+)`,
+  String.raw`(["']?\b${SENSITIVE_KEY}\b["']?\s*[:=]\s*)((["'])(?:(?!\3)[^\n])*\3|[^\s,;)\]}\n]+)`,
   "gi"
 );
+var URL_USERINFO = /([a-z][a-z0-9+.-]*:\/\/[^\s:/?#@"']+:)([^\s/?#"']+)(?=@)/gi;
 var SENSITIVE_GOT_VALUE = new RegExp(
   String.raw`(\[["']${SENSITIVE_KEY}["']\][^\n]{0,200}?\bGot\s+)(["'](?:[^"'\n]*)["']|[^\s,;)\]}\n]+)`,
   "gi"
@@ -42113,6 +42114,10 @@ function redactCredentials(text2, token) {
   out = out.replace(
     AUTHORIZATION_HEADER,
     (match, prefix, scheme, value) => alreadyRedacted(value) ? match : `${prefix}${scheme ?? ""}${REDACTION_MARKER}`
+  );
+  out = out.replace(
+    URL_USERINFO,
+    (match, prefix, value) => alreadyRedacted(value) ? match : `${prefix}${REDACTION_MARKER}`
   );
   out = out.replace(
     CREDENTIAL_QUERY_PARAM,
@@ -42145,7 +42150,7 @@ function redactDeep(value, token, key) {
     return Object.fromEntries(
       Object.entries(value).map(([childKey, child]) => [
         childKey,
-        redactDeep(child, token, childKey)
+        redactDeep(child, token, SENSITIVE_KEY_NAME.test(childKey) ? childKey : key)
       ])
     );
   }
